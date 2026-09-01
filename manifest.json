@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Nexa AI Bot",
+  "version": "1.0.0",
+  "description": "Nexa AI trading assistant that runs exclusively on the Quotex (market-qx.trade) platform.",
+
+  "minimum_chrome_version": "111",
+
+  "host_permissions": [
+    "https://market-qx.trade/*"
+  ],
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://market-qx.trade/*"
+      ],
+      "js": [
+        "inject.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "https://market-qx.trade/*"
+      ],
+      "js": [
+        "strategy.js",
+        "content.js"
+      ],
+      "css": [
+        "style.css"
+      ],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+
+  "action": {
+    "default_title": "Nexa AI Bot"
+  }
+}
