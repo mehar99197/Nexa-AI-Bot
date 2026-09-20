@@ -1,19 +1,37 @@
 {
   "manifest_version": 3,
   "name": "Nexa AI Bot",
-  "version": "1.0.0",
-  "description": "Nexa AI trading assistant that runs exclusively on the Quotex (market-qx.trade) platform.",
+  "version": "1.1.0",
+  "description": "Nexa AI trading assistant that runs on the Quotex trading platform.",
 
   "minimum_chrome_version": "111",
 
-  "host_permissions": [
-    "https://market-qx.trade/*"
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "permissions": [
+    "storage"
   ],
 
   "content_scripts": [
     {
       "matches": [
-        "https://market-qx.trade/*"
+        "https://market-qx.trade/*",
+        "https://*.market-qx.trade/*",
+        "https://qxbroker.com/*",
+        "https://*.qxbroker.com/*",
+        "https://quotex.io/*",
+        "https://*.quotex.io/*",
+        "https://quotex.com/*",
+        "https://*.quotex.com/*",
+        "https://*.quotex-market.com/*",
+        "https://*.qx-market.com/*",
+        "https://*.market-qx.pro/*",
+        "https://*.qxbroker.io/*"
       ],
       "js": [
         "inject.js"
@@ -24,21 +42,50 @@
     },
     {
       "matches": [
-        "https://market-qx.trade/*"
+        "https://market-qx.trade/*",
+        "https://*.market-qx.trade/*",
+        "https://qxbroker.com/*",
+        "https://*.qxbroker.com/*",
+        "https://quotex.io/*",
+        "https://*.quotex.io/*",
+        "https://quotex.com/*",
+        "https://*.quotex.com/*",
+        "https://*.quotex-market.com/*",
+        "https://*.qx-market.com/*",
+        "https://*.market-qx.pro/*",
+        "https://*.qxbroker.io/*"
       ],
       "js": [
         "strategy.js",
+        "autopilot.js",
+        "horizons.js",
         "content.js"
       ],
-      "css": [
-        "style.css"
-      ],
       "run_at": "document_start",
+      "world": "ISOLATED",
       "all_frames": false
     }
   ],
 
-  "action": {
-    "default_title": "Nexa AI Bot"
-  }
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "style.css"
+      ],
+      "matches": [
+        "https://market-qx.trade/*",
+        "https://*.market-qx.trade/*",
+        "https://qxbroker.com/*",
+        "https://*.qxbroker.com/*",
+        "https://quotex.io/*",
+        "https://*.quotex.io/*",
+        "https://quotex.com/*",
+        "https://*.quotex.com/*",
+        "https://*.quotex-market.com/*",
+        "https://*.qx-market.com/*",
+        "https://*.market-qx.pro/*",
+        "https://*.qxbroker.io/*"
+      ]
+    }
+  ]
 }

@@ -1,67 +1,47 @@
 /* ==========================================================================
-   Nexa AutoTrade Bot — injected widget styles
-   Everything is scoped under #nexa-autotrade-widget. The ID selector gives
-   us specificity 1-0-0, which beats virtually every class-based rule on the
-   host page, so we avoid a wall of !important.
+   Nexa AI Bot — one floating card (neon logo · name · Tap-to-run pill)
+   and a big BUY / SELL flash in the middle of the screen.
+
+   Romio-style layout and motion, Nexa's own purple→blue neon palette.
+
+   Loaded INTO the widget's closed shadow root (fetched as a web-accessible
+   resource), so nothing here can reach the page and the page's CSS cannot
+   reach this. Mobile-first: the card is 140px wide and finger-draggable,
+   and it parks over the bottom-left of the chart where Quotex has nothing.
    ========================================================================== */
 
 #nexa-autotrade-widget {
-  /* ---- design tokens ---- */
-  --nexa-radius: 16px;
-  --nexa-glass-top: rgba(28, 33, 48, 0.80);
-  --nexa-glass-bottom: rgba(13, 16, 25, 0.88);
-  --nexa-stroke: rgba(255, 255, 255, 0.10);
-  --nexa-stroke-soft: rgba(255, 255, 255, 0.06);
-  --nexa-sheen: rgba(255, 255, 255, 0.09);
-  --nexa-text: #e8ecf4;
-  --nexa-text-dim: #9aa4b8;
+  --nexa-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", Helvetica, Arial, sans-serif;
+  --nexa-stroke: rgba(148, 130, 255, 0.22);
+  --nexa-text: #f1f5f9;
+  --nexa-muted: #a5b4fc;
+  --nexa-neon: #a78bfa;
+  --nexa-neon-2: #60a5fa;
+  --nexa-purple: #6d28d9;
+  --nexa-purple-deep: #4c1d95;
   --nexa-green: #22c55e;
-  --nexa-green-dark: #15a349;
   --nexa-red: #ef4444;
-  --nexa-red-dark: #c92c2c;
-  --nexa-amber: #f5b544;
+  --nexa-amber: #f59e0b;
 
-  /* ---- placement (JS overwrites left/top once you drag) ----
-     Bottom-left by default: the top-right corner is where Quotex puts the
-     Up/Down buttons, and the widget would sit on top of them. ---- */
   position: fixed !important;
-  left: 24px;
-  bottom: 24px;
+  /* Bottom-left of the chart: clear of Quotex's Up/Down buttons at the very
+     bottom and of the asset header at the top. A dragged position overrides
+     this via inline left/top. */
+  left: 10px;
+  top: 42%;
   z-index: 2147483647 !important;
-  width: 268px;
-
-  /* ---- glass shell ---- */
-  background: linear-gradient(158deg, var(--nexa-glass-top), var(--nexa-glass-bottom));
-  -webkit-backdrop-filter: blur(20px) saturate(165%);
-  backdrop-filter: blur(20px) saturate(165%);
-  border: 1px solid var(--nexa-stroke);
-  border-radius: var(--nexa-radius);
-  box-shadow:
-    0 20px 50px rgba(0, 0, 0, 0.55),
-    0 2px 8px rgba(0, 0, 0, 0.35),
-    inset 0 1px 0 var(--nexa-sheen);
-
-  /* ---- typography reset (host pages love a global font-size) ---- */
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  font-size: 13px;
-  line-height: 1.45;
-  font-weight: 400;
-  letter-spacing: 0;
-  text-transform: none;
-  text-align: left;
-  direction: ltr;
-  color: var(--nexa-text);
-
+  width: 140px;
   margin: 0;
   padding: 0;
-  overflow: hidden;
+  font-family: var(--nexa-font);
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--nexa-text);
   user-select: none;
   -webkit-user-select: none;
-  contain: layout paint;
-  transition: box-shadow 180ms ease, transform 180ms ease;
+  -webkit-tap-highlight-color: transparent;
 }
 
-/* Normalize every descendant so page-wide resets can't reach in. */
 #nexa-autotrade-widget *,
 #nexa-autotrade-widget *::before,
 #nexa-autotrade-widget *::after {
@@ -69,191 +49,354 @@
   margin: 0;
   padding: 0;
   font-family: inherit;
-  line-height: inherit;
   color: inherit;
 }
 
-/* Opaque fallback where backdrop-filter is unavailable/disabled. */
-@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
-  #nexa-autotrade-widget {
-    background: linear-gradient(158deg, #1b2030, #0d1019);
+/* [hidden] must win over every display: declaration below (an author
+   `display:` beats the UA `[hidden]{display:none}` regardless of specificity). */
+#nexa-autotrade-widget [hidden],
+.nexa-flash[hidden] {
+  display: none !important;
+}
+
+/* ---- the card --------------------------------------------------------- */
+
+#nexa-autotrade-widget .nexa-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 10px 13px;
+  border-radius: 26px;
+  /* A purple bloom from the bottom-left and a cool rim light top-right, over
+     near-black navy — the card reads as lit rather than flat. */
+  background:
+    radial-gradient(125% 95% at 16% 112%, rgba(139, 92, 246, 0.36) 0%, rgba(139, 92, 246, 0) 62%),
+    radial-gradient(115% 85% at 104% -8%, rgba(56, 189, 248, 0.20) 0%, rgba(56, 189, 248, 0) 58%),
+    rgba(12, 14, 34, 0.90);
+  border: 1px solid var(--nexa-stroke);
+  box-shadow:
+    0 18px 44px rgba(0, 0, 0, 0.58),
+    0 0 22px rgba(139, 92, 246, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  -webkit-backdrop-filter: blur(18px) saturate(165%);
+  backdrop-filter: blur(18px) saturate(165%);
+  cursor: grab;
+  touch-action: none;           /* finger drags move the card, not the page */
+}
+
+#nexa-autotrade-widget.nexa-dragging .nexa-card {
+  cursor: grabbing;
+  animation: none !important;   /* a breathing box-shadow fights the drag shadow */
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.72), 0 0 30px rgba(139, 92, 246, 0.35);
+}
+
+/* ---- the logo: neon tile inside a hand-drawn scribble ring ------------- */
+
+#nexa-autotrade-widget .nexa-logo {
+  width: 84px;
+  height: 84px;
+  display: grid;
+  place-items: center;
+}
+
+#nexa-autotrade-widget .nexa-logo-svg {
+  width: 84px;
+  height: 84px;
+  display: block;
+  overflow: visible;
+  filter:
+    drop-shadow(0 0 5px rgba(167, 139, 250, 0.75))
+    drop-shadow(0 0 14px rgba(96, 165, 250, 0.45));
+}
+
+/* The two rough loops drift in opposite directions, so the ring reads as a
+   live scribble rather than a spinning graphic. */
+#nexa-autotrade-widget .nexa-ring-a,
+#nexa-autotrade-widget .nexa-ring-b,
+#nexa-autotrade-widget .nexa-ring-b-spin {
+  transform-origin: 50px 50px;
+  transform-box: view-box;
+}
+
+#nexa-autotrade-widget .nexa-ring-a {
+  animation: nexa-ring-cw 22s linear infinite;
+}
+
+#nexa-autotrade-widget .nexa-ring-b {
+  animation: nexa-ring-ccw 16s linear infinite;
+}
+
+/* The faint back loop also carries a fast "working" spin on its group. It is
+   paused (not removed) while the bot is not running, so a start or stop just
+   resumes or freezes it in place and the loop never jumps to a new angle;
+   between runs only the slow drift above is left, same as the front loop. */
+#nexa-autotrade-widget .nexa-ring-b-spin {
+  animation: nexa-ring-ccw 1.5s linear infinite;
+  animation-play-state: paused;
+}
+
+#nexa-autotrade-widget[data-state="running"] .nexa-ring-b-spin {
+  animation-play-state: running;
+}
+
+/* Idle: the ring is present but calm. Running: it glows harder. */
+#nexa-autotrade-widget[data-state="running"] .nexa-logo-svg {
+  filter:
+    drop-shadow(0 0 7px rgba(167, 139, 250, 0.95))
+    drop-shadow(0 0 20px rgba(96, 165, 250, 0.6));
+}
+
+/* ---- the name --------------------------------------------------------- */
+
+#nexa-autotrade-widget .nexa-name {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  background: linear-gradient(90deg, #60a5fa 0%, #a78bfa 52%, #f0abfc 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  /* A gradient clipped to text kills text-shadow, so the halo goes on a
+     blurred copy behind it. */
+  position: relative;
+}
+
+#nexa-autotrade-widget .nexa-name::before {
+  content: attr(data-name);
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  color: #a78bfa;
+  -webkit-text-fill-color: #a78bfa;
+  filter: blur(7px);
+  opacity: 0.75;
+}
+
+/* ---- the pill: Tap to run / Running and the status in one -------------- */
+
+#nexa-autotrade-widget .nexa-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 112px;
+  max-width: 124px;
+  justify-content: center;
+  padding: 8px 12px;
+  border: 1px solid rgba(167, 139, 250, 0.45);
+  border-radius: 999px;
+  background: rgba(30, 27, 75, 0.72);
+  color: #ddd6fe;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.38), inset 0 0 12px rgba(139, 92, 246, 0.16);
+  transition: background 160ms ease, border-color 160ms ease, transform 120ms ease;
+}
+
+#nexa-autotrade-widget .nexa-pill:active {
+  transform: scale(0.96);
+}
+
+#nexa-autotrade-widget .nexa-pill:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+#nexa-autotrade-widget .nexa-pill:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+}
+
+#nexa-autotrade-widget .nexa-pill-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#nexa-autotrade-widget .nexa-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #94a3b8;
+}
+
+#nexa-autotrade-widget[data-state="running"] .nexa-pill {
+  background: rgba(76, 29, 149, 0.88);
+  border-color: rgba(167, 139, 250, 0.85);
+  color: #fff;
+}
+#nexa-autotrade-widget[data-state="running"] .nexa-dot {
+  background: var(--nexa-green);
+  animation: nexa-pulse 1.4s ease-out infinite;
+}
+
+/* The whole card breathes while the bot is live. */
+#nexa-autotrade-widget[data-state="running"] .nexa-card {
+  animation: nexa-breathe 2.8s ease-in-out infinite;
+}
+
+#nexa-autotrade-widget[data-state="paused"] .nexa-pill {
+  background: rgba(76, 29, 149, 0.72);
+  border-color: rgba(245, 158, 11, 0.6);
+}
+#nexa-autotrade-widget[data-state="paused"] .nexa-dot {
+  background: var(--nexa-amber);
+}
+
+#nexa-autotrade-widget[data-state="error"] .nexa-pill {
+  background: rgba(127, 29, 29, 0.9);
+  border-color: rgba(248, 113, 113, 0.7);
+  color: #fee2e2;
+}
+#nexa-autotrade-widget[data-state="error"] .nexa-dot {
+  background: var(--nexa-red);
+}
+
+#nexa-autotrade-widget[data-state="confirm"] .nexa-pill {
+  background: rgba(185, 28, 28, 0.92);
+  border-color: rgba(254, 202, 202, 0.8);
+  color: #fff;
+  animation: nexa-blink 0.9s ease-in-out infinite;
+}
+#nexa-autotrade-widget[data-state="confirm"] .nexa-dot {
+  background: #fff;
+}
+
+/* ---- the caption ------------------------------------------------------- */
+
+/* Romio shows logo · name · pill and nothing else, so the account/record line
+   stays out of the way — it surfaces only when something needs explaining
+   (a refusal, or the live-account second tap), where the 14-char pill alone
+   is not enough. The text is kept up to date either way, so `selftest` and
+   the smoke test can still read it. */
+#nexa-autotrade-widget .nexa-caption {
+  display: none;
+  max-width: 120px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-align: center;
+  color: var(--nexa-muted);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+#nexa-autotrade-widget[data-state="error"] .nexa-caption,
+#nexa-autotrade-widget[data-state="confirm"] .nexa-caption {
+  display: -webkit-box;
+}
+
+/* ---- the BUY / SELL flash ------------------------------------------------ */
+
+.nexa-flash {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2147483647;
+  padding: 18px 46px;
+  border-radius: 22px;
+  border: 2.5px solid currentColor;
+  background: rgba(8, 12, 24, 0.82);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", Helvetica, Arial, sans-serif;
+  font-size: clamp(32px, 11vw, 54px);
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: 0.34em;
+  text-indent: 0.34em;          /* visually centre the letter-spaced word */
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.nexa-flash[data-dir="UP"] {
+  color: #4ade80;
+  box-shadow:
+    0 0 40px rgba(34, 197, 94, 0.7),
+    0 0 90px rgba(34, 197, 94, 0.35),
+    inset 0 0 34px rgba(34, 197, 94, 0.22);
+  text-shadow: 0 0 18px rgba(34, 197, 94, 0.85), 0 0 44px rgba(34, 197, 94, 0.5);
+}
+
+.nexa-flash[data-dir="DOWN"] {
+  color: #f87171;
+  box-shadow:
+    0 0 40px rgba(239, 68, 68, 0.7),
+    0 0 90px rgba(239, 68, 68, 0.35),
+    inset 0 0 34px rgba(239, 68, 68, 0.22);
+  text-shadow: 0 0 18px rgba(239, 68, 68, 0.85), 0 0 44px rgba(239, 68, 68, 0.5);
+}
+
+/* Re-triggered per trade by toggling .nexa-flash--pop in showAlert(); an
+   animation declared on the element itself runs once and never again. */
+.nexa-flash--pop {
+  animation: nexa-flash-pop 340ms cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+/* ---- motion -------------------------------------------------------------- */
+
+@keyframes nexa-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.6); }
+  70%  { box-shadow: 0 0 0 7px rgba(34, 197, 94, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+}
+
+@keyframes nexa-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+
+@keyframes nexa-breathe {
+  0%, 100% {
+    box-shadow:
+      0 18px 44px rgba(0, 0, 0, 0.58),
+      0 0 20px rgba(139, 92, 246, 0.26),
+      inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  }
+  50% {
+    box-shadow:
+      0 18px 44px rgba(0, 0, 0, 0.58),
+      0 0 42px rgba(139, 92, 246, 0.62),
+      inset 0 1px 0 rgba(255, 255, 255, 0.08);
   }
 }
 
-/* ---------- 1. Header / drag handle ---------- */
-
-#nexa-autotrade-widget .nexa-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 11px 14px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.012));
-  border-bottom: 1px solid var(--nexa-stroke-soft);
-  cursor: grab;
-  touch-action: none; /* required so pointermove isn't eaten by scroll */
+@keyframes nexa-ring-cw {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
 }
 
-#nexa-autotrade-widget.nexa-dragging {
-  box-shadow:
-    0 30px 70px rgba(0, 0, 0, 0.65),
-    inset 0 1px 0 var(--nexa-sheen);
-  transform: scale(1.012);
+@keyframes nexa-ring-ccw {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(-360deg); }
 }
 
-#nexa-autotrade-widget.nexa-dragging .nexa-header {
-  cursor: grabbing;
-}
-
-#nexa-autotrade-widget .nexa-brand {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-width: 0;
-}
-
-/* ---------- 2. Title ---------- */
-
-#nexa-autotrade-widget .nexa-title {
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-#nexa-autotrade-widget .nexa-mark {
-  width: 8px;
-  height: 8px;
-  flex: 0 0 8px;
-  border-radius: 50%;
-  background: var(--nexa-green);
-  box-shadow: 0 0 10px rgba(34, 197, 94, 0.85);
-}
-
-/* six-dot grip affordance on the right of the header */
-#nexa-autotrade-widget .nexa-grip {
-  width: 12px;
-  height: 16px;
-  flex: 0 0 12px;
-  opacity: 0.42;
-  background-image: radial-gradient(currentColor 1.2px, transparent 1.3px);
-  background-size: 5px 5px;
-  background-position: 0 2px;
-  color: var(--nexa-text-dim);
-}
-
-/* ---------- 3. Buttons ---------- */
-
-#nexa-autotrade-widget .nexa-body {
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-#nexa-autotrade-widget .nexa-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-}
-
-#nexa-autotrade-widget .nexa-btn {
-  appearance: none;
-  -webkit-appearance: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 36px;
-  padding: 0 12px;
-  border: 1px solid transparent;
-  border-radius: 10px;
-  font-size: 12.5px;
-  font-weight: 600;
-  letter-spacing: 0.3px;
-  color: #ffffff;
-  cursor: pointer;
-  outline: none;
-  transition: transform 110ms ease, box-shadow 160ms ease, filter 160ms ease;
-}
-
-#nexa-autotrade-widget .nexa-btn:hover:not(:disabled) {
-  filter: brightness(1.09);
-}
-
-#nexa-autotrade-widget .nexa-btn:active:not(:disabled) {
-  transform: translateY(1px);
-}
-
-#nexa-autotrade-widget .nexa-btn:focus-visible {
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.75);
-}
-
-#nexa-autotrade-widget .nexa-btn:disabled {
-  opacity: 0.42;
-  cursor: not-allowed;
-  filter: grayscale(0.35);
-}
-
-#nexa-autotrade-widget .nexa-btn--start {
-  background: linear-gradient(180deg, var(--nexa-green), var(--nexa-green-dark));
-  border-color: rgba(134, 239, 172, 0.35);
-  box-shadow: 0 6px 18px rgba(34, 197, 94, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.22);
-}
-
-#nexa-autotrade-widget .nexa-btn--stop {
-  background: linear-gradient(180deg, var(--nexa-red), var(--nexa-red-dark));
-  border-color: rgba(252, 165, 165, 0.32);
-  box-shadow: 0 6px 18px rgba(239, 68, 68, 0.26), inset 0 1px 0 rgba(255, 255, 255, 0.20);
-}
-
-/* ---------- 4. Status area ---------- */
-
-#nexa-autotrade-widget .nexa-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 9px 11px;
-  background: rgba(0, 0, 0, 0.26);
-  border: 1px solid var(--nexa-stroke-soft);
-  border-radius: 10px;
-}
-
-#nexa-autotrade-widget .nexa-status-led {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 7px;
-  border-radius: 50%;
-  background: var(--nexa-amber);
-  box-shadow: 0 0 8px currentColor;
-  color: var(--nexa-amber);
-  animation: nexa-pulse 1.9s ease-in-out infinite;
-}
-
-#nexa-autotrade-widget .nexa-status-text {
-  font-size: 12px;
-  color: var(--nexa-text-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* state colours driven by data-state on the root */
-#nexa-autotrade-widget[data-state="running"] .nexa-status-led { background: var(--nexa-green); color: var(--nexa-green); }
-#nexa-autotrade-widget[data-state="running"] .nexa-status-text { color: #b7f7cd; }
-#nexa-autotrade-widget[data-state="stopped"] .nexa-status-led { background: var(--nexa-red); color: var(--nexa-red); animation: none; }
-#nexa-autotrade-widget[data-state="stopped"] .nexa-status-text { color: #ffc4c4; }
-
-@keyframes nexa-pulse {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.35; }
+@keyframes nexa-flash-pop {
+  from { transform: translate(-50%, -50%) scale(0.72); opacity: 0; }
+  to   { transform: translate(-50%, -50%) scale(1);    opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  #nexa-autotrade-widget,
-  #nexa-autotrade-widget * {
+  #nexa-autotrade-widget .nexa-dot,
+  #nexa-autotrade-widget .nexa-pill,
+  #nexa-autotrade-widget .nexa-card,
+  #nexa-autotrade-widget .nexa-ring-a,
+  #nexa-autotrade-widget .nexa-ring-b,
+  #nexa-autotrade-widget .nexa-ring-b-spin,
+  .nexa-flash--pop {
     animation: none !important;
-    transition: none !important;
   }
 }
