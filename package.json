@@ -1,13 +1,14 @@
 {
   "name": "nexa-ai-bot",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Chrome MV3 extension: demo-account auto-trade assistant for market-qx.trade",
   "private": true,
   "scripts": {
     "test": "node --test",
     "smoke": "node tools/dom-smoke.js",
     "backtest": "node tools/backtest.js",
-    "icons": "node tools/make-icons.js"
+    "icons": "node tools/make-icons.js",
+    "check": "node tools/check-manifest.js"
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",

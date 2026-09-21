@@ -26,8 +26,15 @@
    settlement price, the payout/duration read off the page, and the
    post-reset/thin-feed vetoes' exact timing.
 
+   --walk-forward is the honest version of --sweep: the recording is cut
+   into time slices, the configuration is picked on the slices BEFORE each
+   one and then traded on that slice unseen. A sweep winner that does not
+   survive this was fitted to noise.
+
    Usage:
-     node tools/backtest.js <export.json> [options]
+     node tools/backtest.js [export.json ...] [options]
+       (no file: every *.json in recordings/ — several exports are merged and
+        de-duplicated, so overlapping journals are fine)
        --strategy momentum|zscore|trend|both   models to replay  (default both;
                                          'trend' = trade the EMA state every cooldown)
        --expiry <sec>                    label horizon; picks the windows (default 60)
@@ -35,14 +42,27 @@
        --cooldown <sec>                  simulated trade spacing (default 60)
        --symbol <SYM>                    restrict to one symbol
        --auto                            replay the auto-mode scoreboard
-       --sweep                           parameter grid search
+       --sweep                           parameter grid search (in-sample)
+       --walk-forward [folds]            out-of-sample evaluation (default 5 folds)
+       --by-hour                         hit-rate by local hour of day
+       --htf                             apply the candle-trend / RSI filter
+                                         (CONFIG.HTF_* in content.js) to every entry
        --json                            machine-readable output
    ========================================================================== */
 
 const fs = require('node:fs');
+const path = require('node:path');
 const { decide } = require('../strategy.js');
 const AP = require('../autopilot.js');
 const { horizonFor, buildVariants } = require('../horizons.js');
+const Candles = require('../candles.js');
+
+// A grid of ~18 configurations ranked by EV on 5 trades is a lottery, not a
+// calibration: the winner is whichever one got lucky. Rows need 30 decided
+// trades to appear (in a sweep, or to be chosen by a walk-forward fold), and
+// they are ranked by the Wilson lower bound of the hit-rate — the estimate
+// that already pays for its own sample size.
+const SWEEP_MIN_DECIDED = 30;
 
 // Mirror content.js — the replay must see exactly what the live bot sees.
 const MAX_HISTORY = 300;
@@ -53,6 +73,28 @@ const MIN_TICKS_10S = 8;
 const POST_RESET_QUIET_MS = 30_000;
 // Auto-mode bar, as in content.js CONFIG.
 const AUTO = { MIN_SAMPLES: 100, MARGIN: 0.01, ROLLING: 300, CONFIDENCE_Z: 2.0 };
+// The higher-timeframe filter, as in content.js CONFIG (HTF_*).
+const HTF = { CANDLE_SEC: 60, EMA_FAST: 8, EMA_SLOW: 21, RSI_PERIOD: 14, RSI_BLOCK: 70, KEEP: 240 };
+
+/**
+ * The live tradeVeto's candle gates, replayed: a fresh series per call
+ * that the caller feeds every sample of the symbol (candles persist across
+ * gap segments, as they do live). `veto(dir)` names the gate that would
+ * hold an entry in that direction, or null.
+ */
+function htfGate() {
+  const series = Candles.createSeries(HTF.CANDLE_SEC * 1000, HTF.KEEP);
+  const opts = { fast: HTF.EMA_FAST, slow: HTF.EMA_SLOW, rsiPeriod: HTF.RSI_PERIOD, rsiBlock: HTF.RSI_BLOCK };
+  return {
+    push: (t, price) => Candles.push(series, t, price),
+    veto: (dir) => {
+      const view = Candles.bias(series, opts);
+      if (view.warm && view.dir !== null && view.dir !== dir) return 'against candle trend';
+      if ((dir === 'UP' && view.blockUp) || (dir === 'DOWN' && view.blockDown)) return 'rsi stretched';
+      return null;
+    },
+  };
+}
 
 /** The single-model configs the live bot runs for this expiry. */
 function baseConfigsFor(expirySec) {
@@ -192,24 +234,30 @@ function withEv(tallied, payoutPct) {
   };
 }
 
-function backtestSymbol(samples, config, opts) {
+/** Every signal one configuration produces over the samples, labeled one
+    expiry later, plus the evaluation count and the gate histogram — the raw
+    material backtestSymbol and walkForward both work from. */
+function collectSignals(samples, config, opts) {
   const reasons = Object.create(null);
   const signals = [];
   let evaluations = 0;
   const slip = opts.slippageFrac || 0;
+  const gate = opts.htf ? htfGate() : null;
 
   for (const segment of segmentSamples(samples, MAX_SAMPLE_GAP_MS)) {
     const history = [];
     for (let index = 0; index < segment.length; index += 1) {
       history.push({ t: segment[index].t, price: segment[index].price });
       if (history.length > MAX_HISTORY) history.shift();
+      if (gate) gate.push(segment[index].t, segment[index].price);
       const view = decide(history, config);
       evaluations += 1;
       if (!view.signal) {
         reasons[view.reason] = (reasons[view.reason] || 0) + 1;
         continue;
       }
-      const veto = opts.vetoes === false ? null : offlineVeto(segment, index);
+      const veto = (opts.vetoes === false ? null : offlineVeto(segment, index)) ||
+        (gate ? gate.veto(view.signal) : null);
       if (veto) {
         reasons['held: ' + veto] = (reasons['held: ' + veto] || 0) + 1;
         continue;
@@ -225,15 +273,88 @@ function backtestSymbol(samples, config, opts) {
       });
     }
   }
+  return { evaluations, reasons, signals };
+}
 
-  const all = tally(signals);
+function backtestSymbol(samples, config, opts) {
+  const { evaluations, reasons, signals } = collectSignals(samples, config, opts);
   const taken = simulateTrades(signals, opts.cooldownMs);
   return {
     evaluations,
     reasons,
-    all,
+    all: tally(signals),
     trades: withEv(tally(taken), opts.payoutPct),
+    // Kept for --by-hour; stripped from --json output (see main).
+    taken,
   };
+}
+
+/**
+ * Walk-forward evaluation: the recording is cut into `folds` equal time
+ * slices. For every slice after the first, the configuration is chosen on
+ * the data BEFORE it (best Wilson lower bound of the simulated trades, with
+ * at least SWEEP_MIN_DECIDED decided ones) and then traded on the slice
+ * itself, unseen. Pooling those out-of-sample trades answers the question
+ * a sweep cannot: does the winner keep winning on data it was not fitted
+ * to? A fold with no configuration over the bar trades nothing — exactly
+ * what the live bot does while nothing is proven.
+ *
+ * Signals are computed once per configuration over the whole recording
+ * (the live history is continuous, so each slice starts warm, as it would
+ * live); the folds only decide which signals count as training and which
+ * as test.
+ */
+function walkForward(samples, configs, opts, folds) {
+  if (!Array.isArray(samples) || samples.length < 2 ||
+      !Number.isInteger(folds) || folds < 2 || !Array.isArray(configs) || configs.length === 0) {
+    return null;
+  }
+  const t0 = samples[0].t;
+  const t1 = samples[samples.length - 1].t;
+  const edge = (k) => t0 + (t1 - t0) * k / folds;   // slice k spans [edge(k), edge(k+1))
+  const perConfig = configs.map((config) => ({
+    label: configLabel(config),
+    signals: collectSignals(samples, config, opts).signals,
+  }));
+  const oos = [];
+  const steps = [];
+  for (let k = 1; k < folds; k += 1) {
+    const trainEnd = edge(k);
+    const testEnd = k === folds - 1 ? Infinity : edge(k + 1);
+    let best = null;
+    for (const entry of perConfig) {
+      const train = tally(simulateTrades(
+        entry.signals.filter((s) => s.t < trainEnd), opts.cooldownMs));
+      if (train.wins + train.losses < SWEEP_MIN_DECIDED || train.lowerBound === null) continue;
+      if (best === null || train.lowerBound > best.train.lowerBound) best = { entry, train };
+    }
+    if (best === null) {
+      steps.push({ fold: k, from: trainEnd, chosen: null, train: null, test: null });
+      continue;
+    }
+    const taken = simulateTrades(
+      best.entry.signals.filter((s) => s.t >= trainEnd && s.t < testEnd), opts.cooldownMs);
+    oos.push(...taken);
+    steps.push({
+      fold: k, from: trainEnd, chosen: best.entry.label,
+      train: best.train, test: withEv(tally(taken), opts.payoutPct),
+    });
+  }
+  return { folds, steps, oos: withEv(tally(oos), opts.payoutPct), oosTrades: oos };
+}
+
+/** Simulated trades bucketed by local hour of day. Markets have a daily
+    rhythm (session opens, the OTC weekend feed, thin nights) and a record
+    that only wins at certain hours is a schedule, not a strategy. */
+function hourBuckets(trades) {
+  const buckets = Array.from({ length: 24 }, () => []);
+  for (const trade of trades) {
+    if (!trade || !Number.isFinite(trade.t)) continue;
+    buckets[new Date(trade.t).getHours()].push(trade);
+  }
+  return buckets
+    .map((list, hour) => ({ hour, ...tally(list) }))
+    .filter((bucket) => bucket.total > 0);
 }
 
 /**
@@ -256,6 +377,7 @@ function backtestAuto(samples, opts) {
   let firstQualifiedAt = null;
   let zaThreshold = row.zscore.Z_SCORE_THRESHOLD;
   const zBuffer = [];
+  const gate = opts.htf ? htfGate() : null;
 
   for (const segment of segmentSamples(samples, MAX_SAMPLE_GAP_MS)) {
     const history = [];
@@ -264,6 +386,7 @@ function backtestAuto(samples, opts) {
       const sample = { t: segment[index].t, price: segment[index].price };
       history.push(sample);
       if (history.length > MAX_HISTORY) history.shift();
+      if (gate) gate.push(sample.t, sample.price);
 
       const settled = AP.settlePendings(pendings, sample, EXPIRY_TOLERANCE_MS);
       pendings = settled.keep;
@@ -302,6 +425,7 @@ function backtestAuto(samples, opts) {
       if (firstQualifiedAt === null) firstQualifiedAt = sample.t;
       if (offlineVeto(segment, index)) continue;
       const dir = pendings.find((p) => p.variantId === best.id).dir;
+      if (gate && gate.veto(dir)) continue;
       const outcome = labelAt(segment, index, opts.expiryMs, EXPIRY_TOLERANCE_MS,
         handicapped(sample.price, dir, slip));
       real.push({ t: sample.t, dir, variant: best.id, label: outcome === null ? null : outcome.label });
@@ -402,12 +526,6 @@ function printReport(results, breakEven) {
   }
 }
 
-// A grid of ~18 configurations ranked by EV on 5 trades is a lottery, not a
-// calibration: the winner is whichever one got lucky. Rows need 30 decided
-// trades to appear, and they are ranked by the Wilson lower bound of the
-// hit-rate — the estimate that already pays for its own sample size.
-const SWEEP_MIN_DECIDED = 30;
-
 function printSweep(results, breakEven) {
   const rows = results
     .filter((r) => r.trades.wins + r.trades.losses >= SWEEP_MIN_DECIDED)
@@ -431,6 +549,49 @@ function printSweep(results, breakEven) {
     'of the hit-rate on THIS recording clears break-even. Out-of-sample it will be lower — ' +
     'the best of ' + results.length + ' configurations is still the best of ' +
     results.length + '.');
+}
+
+function verdict(tallied, breakEven) {
+  if (tallied.lowerBound === null) return 'too few trades';
+  return tallied.lowerBound >= breakEven ? 'PROVEN above break-even' : 'not proven above break-even';
+}
+
+function printWalkForward(results, breakEven) {
+  for (const r of results) {
+    console.log('\n' + r.symbol + ' — walk-forward, ' + r.folds + ' folds (configuration picked on ' +
+      'everything before each slice, then traded on the slice unseen)');
+    for (const step of r.steps) {
+      const at = new Date(step.from).toISOString().slice(0, 16).replace('T', ' ');
+      if (step.chosen === null) {
+        console.log('  fold ' + step.fold + ' from ' + at + ': nothing over the bar on the training data — no trades');
+        continue;
+      }
+      console.log('  fold ' + step.fold + ' from ' + at + ': ' + step.chosen +
+        ' (train LB ' + pct(step.train.lowerBound) + '/' + (step.train.wins + step.train.losses) +
+        ') -> ' + step.test.wins + 'W-' + step.test.losses + 'L-' + step.test.draws + 'D' +
+        ' hit ' + pct(step.test.hitRate) + ' LB ' + pct(step.test.lowerBound));
+    }
+    console.log('  OUT-OF-SAMPLE: ' + r.oos.total + ' trades — ' + r.oos.wins + 'W-' + r.oos.losses +
+      'L-' + r.oos.draws + 'D  hit ' + pct(r.oos.hitRate) + '  lower bound ' + pct(r.oos.lowerBound) +
+      ' | EV ' + (r.oos.ev >= 0 ? '+' : '') + r.oos.ev + ' stakes  [' + verdict(r.oos, breakEven) + ']');
+  }
+  console.log('\nOut-of-sample is the number to believe. A sweep that says "proven" while this ' +
+    'says "not proven" found a configuration that fitted the past, not the market.');
+}
+
+function printHours(label, buckets, breakEven) {
+  const rows = buckets.filter((b) => b.wins + b.losses >= 10);
+  console.log('\n' + label + ' — by local hour of day (hours with 10+ decided trades)');
+  if (rows.length === 0) {
+    console.log('  no hour has 10 decided trades yet');
+    return;
+  }
+  console.log('  ' + pad('hour', 7) + pad('trades', 8) + pad('hit', 8) + pad('LB', 8) + 'verdict');
+  for (const b of rows) {
+    console.log('  ' + pad(String(b.hour).padStart(2, '0') + ':00', 7) + pad(b.wins + b.losses, 8) +
+      pad(pct(b.hitRate), 8) + pad(pct(b.lowerBound), 8) +
+      (b.lowerBound >= breakEven ? 'above BE' : 'below BE'));
+  }
 }
 
 function printAuto(results) {
@@ -492,34 +653,61 @@ function medianSlippageFrac(trades) {
 
 /* ------------------------------ CLI ------------------------------------- */
 
+const RECORDINGS_DIR = path.join(__dirname, '..', 'recordings');
+
+function usage() {
+  console.error('Usage: node tools/backtest.js [export.json ...] ' +
+    '[--strategy momentum|zscore|trend|both] [--expiry sec] [--payout pct] ' +
+    '[--cooldown sec] [--symbol SYM] [--auto] [--sweep] [--walk-forward [folds]] ' +
+    '[--by-hour] [--htf] [--json]\n' +
+    'With no file, every *.json in recordings/ is loaded.');
+  process.exit(2);
+}
+
 function parseArgs(argv) {
   const opts = {
-    file: null, strategy: 'both', expirySec: 60, payoutPct: 85,
+    files: [], strategy: 'both', expirySec: 60, payoutPct: 85,
     cooldownSec: 60, symbol: null, sweep: false, auto: false, json: false,
+    walkForward: 0, byHour: false, htf: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--sweep') opts.sweep = true;
     else if (arg === '--auto') opts.auto = true;
     else if (arg === '--json') opts.json = true;
+    else if (arg === '--by-hour') opts.byHour = true;
+    else if (arg === '--htf') opts.htf = true;
+    else if (arg === '--walk-forward') {
+      // The fold count is optional: "--walk-forward 8" or just "--walk-forward".
+      const next = argv[index + 1];
+      if (next !== undefined && /^\d+$/.test(next)) { opts.walkForward = Number(next); index += 1; }
+      else opts.walkForward = 5;
+    }
     else if (arg === '--strategy') { opts.strategy = argv[index + 1]; index += 1; }
     else if (arg === '--expiry') { opts.expirySec = Number(argv[index + 1]); index += 1; }
     else if (arg === '--payout') { opts.payoutPct = Number(argv[index + 1]); index += 1; }
     else if (arg === '--cooldown') { opts.cooldownSec = Number(argv[index + 1]); index += 1; }
     else if (arg === '--symbol') { opts.symbol = argv[index + 1]; index += 1; }
-    else if (!arg.startsWith('--') && opts.file === null) opts.file = arg;
+    else if (!arg.startsWith('--')) opts.files.push(arg);
     else { console.error('Unknown option: ' + arg); process.exit(2); }
   }
-  if (!opts.file) {
-    console.error('Usage: node tools/backtest.js <export.json> ' +
-      '[--strategy momentum|zscore|trend|both] [--expiry sec] [--payout pct] ' +
-      '[--cooldown sec] [--symbol SYM] [--auto] [--sweep] [--json]');
-    process.exit(2);
+  if (opts.files.length === 0) {
+    // The pipeline's default: everything exported into recordings/.
+    let names = [];
+    try { names = fs.readdirSync(RECORDINGS_DIR).filter((name) => /\.json$/i.test(name)).sort(); }
+    catch (_) { /* no recordings/ folder */ }
+    if (names.length === 0) {
+      console.error('No export given and nothing in recordings/. Turn on "Record ticks", ' +
+        'export from the popup (or __nexaDebug.exportTicks()) and drop the file there.');
+      usage();
+    }
+    opts.files = names.map((name) => path.join(RECORDINGS_DIR, name));
   }
   if (!['momentum', 'zscore', 'trend', 'both'].includes(opts.strategy) ||
       !Number.isFinite(opts.expirySec) || opts.expirySec <= 0 ||
       !Number.isFinite(opts.payoutPct) || opts.payoutPct <= 0 ||
-      !Number.isFinite(opts.cooldownSec) || opts.cooldownSec < 0) {
+      !Number.isFinite(opts.cooldownSec) || opts.cooldownSec < 0 ||
+      !Number.isInteger(opts.walkForward) || (opts.walkForward !== 0 && opts.walkForward < 2)) {
     console.error('Invalid option value.');
     process.exit(2);
   }
@@ -528,13 +716,49 @@ function parseArgs(argv) {
   return opts;
 }
 
+/**
+ * One or more nexa-ticks-v1 exports merged into a single {ticks, trades}.
+ * The recorder keeps a rolling window, so two exports a day apart share most
+ * of their rows: ticks are de-duplicated on symbol + arrival time (a quotes
+ * frame carries one row per symbol, so that pair is unique), trades on their
+ * click time + symbol.
+ */
+function loadExports(files) {
+  const ticks = [];
+  const trades = [];
+  const seenTicks = new Set();
+  const seenTrades = new Set();
+  for (const file of files) {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (raw.format !== 'nexa-ticks-v1' || !Array.isArray(raw.ticks)) {
+      console.error('Not a nexa-ticks-v1 export: ' + file);
+      process.exit(2);
+    }
+    for (const row of raw.ticks) {
+      if (!Array.isArray(row) || row.length < 4) continue;
+      if (files.length > 1) {
+        const key = row[0] + '|' + row[2];
+        if (seenTicks.has(key)) continue;
+        seenTicks.add(key);
+      }
+      ticks.push(row);
+    }
+    for (const trade of Array.isArray(raw.trades) ? raw.trades : []) {
+      if (!trade || typeof trade !== 'object') continue;
+      if (files.length > 1) {
+        const key = trade.t + '|' + trade.sym;
+        if (seenTrades.has(key)) continue;
+        seenTrades.add(key);
+      }
+      trades.push(trade);
+    }
+  }
+  return { ticks, trades, files: files.length };
+}
+
 function main() {
   const opts = parseArgs(process.argv.slice(2));
-  const raw = JSON.parse(fs.readFileSync(opts.file, 'utf8'));
-  if (raw.format !== 'nexa-ticks-v1' || !Array.isArray(raw.ticks)) {
-    console.error('Not a nexa-ticks-v1 export: ' + opts.file);
-    process.exit(2);
-  }
+  const raw = loadExports(opts.files);
 
   const bySymbol = groupBySymbol(raw.ticks);
   const symbols = [...bySymbol.keys()]
@@ -552,13 +776,16 @@ function main() {
   opts.slippageFrac = medianSlippageFrac(raw.trades);
   const horizon = horizonFor(opts.expirySec);
   if (!opts.json) {
-    console.log('Loaded ' + raw.ticks.length.toLocaleString() + ' ticks, ' +
+    console.log('Loaded ' + raw.ticks.length.toLocaleString() + ' ticks from ' + raw.files +
+      ' file' + (raw.files === 1 ? '' : 's') + ', ' +
       bySymbol.size + ' symbols | expiry ' + opts.expirySec + 's (horizon ' + horizon.label +
       ') | payout ' + opts.payoutPct + '% -> break-even hit-rate ' +
       (breakEven * 100).toFixed(1) + '%' +
       (opts.slippageFrac > 0
         ? ' | entry handicap ' + (opts.slippageFrac * 100).toFixed(4) + '% (median real slippage)'
-        : ' | no slippage handicap (fewer than 5 real fills in the export)'));
+        : ' | no slippage handicap (fewer than 5 real fills in the export)') +
+      (opts.htf ? ' | HTF filter on (' + HTF.CANDLE_SEC + 's candles, EMA ' + HTF.EMA_FAST + '/' +
+        HTF.EMA_SLOW + ', RSI ' + HTF.RSI_BLOCK + ')' : ''));
   }
 
   if (opts.auto) {
@@ -572,6 +799,29 @@ function main() {
   }
 
   const base = baseConfigsFor(opts.expirySec);
+
+  if (opts.walkForward > 0) {
+    // The candidate set is the sweep grid — the choice a person would make
+    // from a sweep table, made automatically and honestly per fold.
+    const grid = sweepConfigs(opts.strategy, opts.expirySec);
+    const results = symbols.map((sym) => ({
+      symbol: sym, ...walkForward(bySymbol.get(sym), grid, opts, opts.walkForward),
+    }));
+    if (opts.json) {
+      const slim = results.map(({ oosTrades, ...rest }) => (opts.byHour
+        ? { ...rest, byHour: hourBuckets(oosTrades) } : rest));
+      console.log(JSON.stringify({ breakEven, walkForward: slim }, null, 2));
+      return;
+    }
+    printWalkForward(results, breakEven);
+    if (opts.byHour) {
+      for (const r of results) {
+        printHours(r.symbol + ' (out-of-sample)', hourBuckets(r.oosTrades), breakEven);
+      }
+    }
+    return;
+  }
+
   const configs = opts.sweep ? sweepConfigs(opts.strategy, opts.expirySec)
     : opts.strategy === 'both'
       ? [base.momentum, base.zscore]
@@ -590,11 +840,16 @@ function main() {
   }
 
   if (opts.json) {
-    console.log(JSON.stringify({ breakEven, results }, null, 2));
+    const slim = results.map(({ taken, ...rest }) => (opts.byHour
+      ? { ...rest, byHour: hourBuckets(taken) } : rest));
+    console.log(JSON.stringify({ breakEven, results: slim }, null, 2));
     return;
   }
   if (opts.sweep) printSweep(results, breakEven);
   else printReport(results, breakEven);
+  if (opts.byHour && !opts.sweep) {
+    for (const r of results) printHours(r.symbol + ' — ' + r.config, hourBuckets(r.taken), breakEven);
+  }
 
   if (Array.isArray(raw.trades) && raw.trades.length > 0) {
     printRealTrades(raw.trades);
@@ -602,8 +857,9 @@ function main() {
 }
 
 module.exports = {
-  groupBySymbol, segmentSamples, labelAt, offlineVeto, backtestSymbol, backtestAuto,
-  simulateTrades, sweepConfigs, baseConfigsFor, medianSlippageFrac, BASE_CONFIGS,
+  groupBySymbol, segmentSamples, labelAt, offlineVeto, collectSignals, backtestSymbol,
+  backtestAuto, walkForward, hourBuckets, loadExports, simulateTrades, sweepConfigs,
+  baseConfigsFor, medianSlippageFrac, htfGate, BASE_CONFIGS, SWEEP_MIN_DECIDED, HTF,
 };
 
 if (require.main === module) main();

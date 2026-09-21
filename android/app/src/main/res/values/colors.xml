@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- "Neon Nexa" — the same tokens as popup.css / style.css. -->
+<resources>
+    <color name="nexa_bg">#0B1020</color>          <!-- app ground (settings screen, launcher icon) -->
+    <color name="nexa_surface">#121A33</color>
+    <color name="nexa_line">#38A78BFA</color>      <!-- rgba(167,139,250,0.22) -->
+    <color name="nexa_text">#E6E9F5</color>
+    <color name="nexa_accent">#A78BFA</color>
+    <color name="nexa_trade_bg">#0B1020</color>    <!-- behind the (dark) Quotex page while it loads -->
+</resources>

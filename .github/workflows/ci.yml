@@ -1,0 +1,38 @@
+# Runs on every push and pull request: unit tests (dependency-free), the
+# jsdom smoke harness (boots the real widget against a mock Quotex page) and
+# the manifest check. A red badge here means the extension is broken before
+# anyone loads it in Chrome.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No lockfile is committed (see .gitignore), so this is `install`, not `ci`.
+      - name: Install dev dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Manifest + syntax check
+        run: npm run check
+
+      - name: Unit tests
+        run: npm test
+
+      - name: DOM smoke harness
+        run: npm run smoke

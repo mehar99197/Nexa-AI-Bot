@@ -5,7 +5,11 @@ const test = require('node:test');
 const {
   groupBySymbol, segmentSamples, labelAt, offlineVeto, backtestSymbol, backtestAuto,
   simulateTrades, sweepConfigs, baseConfigsFor, medianSlippageFrac, BASE_CONFIGS,
+  collectSignals, walkForward, hourBuckets, loadExports, SWEEP_MIN_DECIDED,
 } = require('../tools/backtest.js');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { horizonFor } = require('../horizons.js');
 
 function samplesFromReturns(returns, spacingMs = 500, start = 100) {
@@ -174,4 +178,103 @@ test('backtestAuto replays the pool and never takes a real trade on a coin flip'
   // With no edge in the series, real trades should be rare to nonexistent.
   assert.ok(result.real.total <= Math.max(3, result.virtualOutcomes * 0.01),
     'took ' + result.real.total + ' real trades on noise');
+});
+
+/* ---- pipeline: walk-forward, hour buckets, merged exports ---------------- */
+
+/** A 2Hz series whose drift flips sign every `block` samples — a momentum
+    model has something to catch, and a walk-forward fold has trades to
+    count. Deterministic (LCG noise) so the assertions are stable. */
+function regimeSamples(n, block, t0 = 0) {
+  let seed = 11;
+  const rand = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  const samples = [];
+  let price = 100;
+  let drift = 0.00004;
+  for (let index = 0; index < n; index += 1) {
+    if (index % block === 0) drift = -drift;
+    price *= Math.exp(drift + (rand() - 0.5) * 0.00002);
+    samples.push({ t: t0 + index * 500, price });
+  }
+  return samples;
+}
+
+const PIPE_OPTS = { expiryMs: 60_000, cooldownMs: 20_000, payoutPct: 85 };
+
+test('collectSignals is what backtestSymbol tallies — same signals, same trades', () => {
+  const samples = regimeSamples(6_000, 600);
+  const { signals } = collectSignals(samples, BASE_CONFIGS.momentum, PIPE_OPTS);
+  const result = backtestSymbol(samples, BASE_CONFIGS.momentum, PIPE_OPTS);
+  assert.equal(result.all.total, signals.length);
+  assert.equal(result.taken.length, simulateTrades(signals, PIPE_OPTS.cooldownMs).length);
+  assert.equal(result.trades.total, result.taken.length);
+});
+
+test('walkForward picks on the past and trades the next slice only', () => {
+  const samples = regimeSamples(24_000, 600);            // ~3.3 hours of ticks
+  const grid = sweepConfigs('momentum', 60);
+  const wf = walkForward(samples, grid, PIPE_OPTS, 4);
+  assert.equal(wf.folds, 4);
+  assert.equal(wf.steps.length, 3);                       // the first slice is training only
+  const t0 = samples[0].t;
+  const span = samples[samples.length - 1].t - t0;
+  for (const step of wf.steps) {
+    assert.equal(step.from, t0 + span * step.fold / 4);
+    if (step.chosen === null) continue;
+    assert.ok(step.train.wins + step.train.losses >= SWEEP_MIN_DECIDED, 'chosen on 30+ decided trades');
+    assert.ok(grid.some((c) => step.chosen.includes('EMA ' + c.EMA_FAST + '/' + c.EMA_SLOW)),
+      'chosen label names a grid configuration: ' + step.chosen);
+  }
+  // Out-of-sample trades all fall after the first slice, and the pool is the
+  // sum of the per-step test tallies.
+  assert.ok(wf.oosTrades.every((trade) => trade.t >= t0 + span / 4));
+  const pooled = wf.steps.reduce((sum, s) => sum + (s.test ? s.test.total : 0), 0);
+  assert.equal(wf.oos.total, pooled);
+  assert.equal(wf.oos.total, wf.oosTrades.length);
+});
+
+test('walkForward trades nothing when no configuration clears the bar', () => {
+  const samples = regimeSamples(1_200, 600);              // 10 minutes: far too few trades
+  const wf = walkForward(samples, sweepConfigs('momentum', 60), PIPE_OPTS, 3);
+  assert.equal(wf.steps.length, 2);
+  assert.ok(wf.steps.every((step) => step.chosen === null));
+  assert.equal(wf.oos.total, 0);
+  assert.equal(wf.oos.lowerBound, null);
+});
+
+test('walkForward rejects junk input', () => {
+  assert.equal(walkForward([], [BASE_CONFIGS.momentum], PIPE_OPTS, 3), null);
+  assert.equal(walkForward(regimeSamples(100, 50), [], PIPE_OPTS, 3), null);
+  assert.equal(walkForward(regimeSamples(100, 50), [BASE_CONFIGS.momentum], PIPE_OPTS, 1), null);
+});
+
+test('hourBuckets groups simulated trades by local hour and skips empty hours', () => {
+  const at = (hour, minute) => new Date(2026, 8, 18, hour, minute).getTime();
+  const trades = [
+    { t: at(9, 5), dir: 'UP', label: 1 }, { t: at(9, 20), dir: 'UP', label: -1 },
+    { t: at(9, 40), dir: 'DOWN', label: -1 }, { t: at(14, 0), dir: 'UP', label: 0 },
+    { t: NaN }, null,
+  ];
+  const buckets = hourBuckets(trades);
+  assert.deepEqual(buckets.map((b) => b.hour), [9, 14]);
+  assert.equal(buckets[0].wins, 2);
+  assert.equal(buckets[0].losses, 1);
+  assert.equal(buckets[1].draws, 1);
+  assert.equal(buckets[1].hitRate, null);
+});
+
+test('loadExports merges several exports and drops the rows they share', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nexa-bt-'));
+  const rows = (from, to) => Array.from({ length: to - from }, (_, i) => ['EURUSD_otc', 1, (from + i) * 500, 1.08]);
+  const trade = { t: 1000, sym: 'EURUSD_otc', profit: 0.85 };
+  const one = path.join(dir, 'one.json');
+  const two = path.join(dir, 'two.json');
+  fs.writeFileSync(one, JSON.stringify({ format: 'nexa-ticks-v1', ticks: rows(0, 100), trades: [trade] }));
+  fs.writeFileSync(two, JSON.stringify({ format: 'nexa-ticks-v1', ticks: rows(50, 160), trades: [trade, { t: 2000, sym: 'X' }] }));
+  const merged = loadExports([one, two]);
+  assert.equal(merged.files, 2);
+  assert.equal(merged.ticks.length, 160);               // 100 + 110 - 50 shared
+  assert.equal(merged.trades.length, 2);
+  // A single file is passed through untouched (no de-duplication pass).
+  assert.equal(loadExports([one]).ticks.length, 100);
 });

@@ -1,18 +1,26 @@
 /* ==========================================================================
-   Nexa AI Bot — one floating card (neon logo · name · Tap-to-run pill)
-   and a big BUY / SELL flash in the middle of the screen.
+   Nexa AI Bot — one floating card (neon logo · name · Tap-to-run pill ·
+   caption) and a big BUY / SELL flash in the middle of the screen.
 
-   Romio-style layout and motion, Nexa's own purple→blue neon palette.
+   "Neon Nexa": near-black navy, purple→blue neon, the scribble-ring robot.
+   The same tokens drive popup.css and the Android shell.
 
    Loaded INTO the widget's closed shadow root (fetched as a web-accessible
    resource), so nothing here can reach the page and the page's CSS cannot
    reach this. Mobile-first: the card is 140px wide and finger-draggable,
    and it parks over the bottom-left of the chart where Quotex has nothing.
+
+   Performance: the card sits over a canvas chart that repaints many times a
+   second. Anything that makes the compositor re-filter the card on every
+   chart frame (backdrop-filter) or re-rasterize a filtered subtree on every
+   animation frame (filter on the SVG whose rings rotate) costs a phone dear
+   — the trading page itself starts to stutter. So: no backdrop-filter, the
+   halo is a static box-shadow, and on touch screens the rings stand still.
    ========================================================================== */
 
 #nexa-autotrade-widget {
   --nexa-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", Helvetica, Arial, sans-serif;
-  --nexa-stroke: rgba(148, 130, 255, 0.22);
+  --nexa-stroke: rgba(148, 130, 255, 0.24);
   --nexa-text: #f1f5f9;
   --nexa-muted: #a5b4fc;
   --nexa-neon: #a78bfa;
@@ -69,18 +77,17 @@
   padding: 14px 10px 13px;
   border-radius: 26px;
   /* A purple bloom from the bottom-left and a cool rim light top-right, over
-     near-black navy — the card reads as lit rather than flat. */
+     near-black navy — the card reads as lit rather than flat. Opaque enough
+     that nothing behind it needs blurring. */
   background:
     radial-gradient(125% 95% at 16% 112%, rgba(139, 92, 246, 0.36) 0%, rgba(139, 92, 246, 0) 62%),
     radial-gradient(115% 85% at 104% -8%, rgba(56, 189, 248, 0.20) 0%, rgba(56, 189, 248, 0) 58%),
-    rgba(12, 14, 34, 0.90);
+    rgba(12, 14, 34, 0.96);
   border: 1px solid var(--nexa-stroke);
   box-shadow:
     0 18px 44px rgba(0, 0, 0, 0.58),
     0 0 22px rgba(139, 92, 246, 0.22),
     inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  -webkit-backdrop-filter: blur(18px) saturate(165%);
-  backdrop-filter: blur(18px) saturate(165%);
   cursor: grab;
   touch-action: none;           /* finger drags move the card, not the page */
 }
@@ -98,6 +105,10 @@
   height: 84px;
   display: grid;
   place-items: center;
+  border-radius: 50%;
+  /* The halo: a static shadow on the container, not a filter on the SVG —
+     a filtered subtree with rotating children re-rasterizes every frame. */
+  box-shadow: 0 0 22px rgba(139, 92, 246, 0.45), 0 0 6px rgba(96, 165, 250, 0.25);
 }
 
 #nexa-autotrade-widget .nexa-logo-svg {
@@ -105,15 +116,13 @@
   height: 84px;
   display: block;
   overflow: visible;
-  filter:
-    drop-shadow(0 0 5px rgba(167, 139, 250, 0.75))
-    drop-shadow(0 0 14px rgba(96, 165, 250, 0.45));
 }
 
-/* The two rough loops drift in opposite directions, so the ring reads as a
-   live scribble rather than a spinning graphic. */
+/* Idle: the two rough loops drift slowly in opposite directions, so the ring
+   reads as a live scribble rather than a spinning graphic. */
 #nexa-autotrade-widget .nexa-ring-a,
 #nexa-autotrade-widget .nexa-ring-b,
+#nexa-autotrade-widget .nexa-ring-a-spin,
 #nexa-autotrade-widget .nexa-ring-b-spin {
   transform-origin: 50px 50px;
   transform-box: view-box;
@@ -127,24 +136,28 @@
   animation: nexa-ring-ccw 16s linear infinite;
 }
 
-/* The faint back loop also carries a fast "working" spin on its group. It is
-   paused (not removed) while the bot is not running, so a start or stop just
-   resumes or freezes it in place and the loop never jumps to a new angle;
-   between runs only the slow drift above is left, same as the front loop. */
+/* Running: each loop's group carries a fast "working" spin on top of the
+   drift. The spins are paused (not removed) while the bot is not running,
+   so a start or stop just resumes or freezes them in place and a loop never
+   jumps to a new angle; between runs only the slow drift is left. */
+#nexa-autotrade-widget .nexa-ring-a-spin {
+  animation: nexa-ring-cw 2.4s linear infinite;
+  animation-play-state: paused;
+}
+
 #nexa-autotrade-widget .nexa-ring-b-spin {
   animation: nexa-ring-ccw 1.5s linear infinite;
   animation-play-state: paused;
 }
 
+#nexa-autotrade-widget[data-state="running"] .nexa-ring-a-spin,
 #nexa-autotrade-widget[data-state="running"] .nexa-ring-b-spin {
   animation-play-state: running;
 }
 
 /* Idle: the ring is present but calm. Running: it glows harder. */
-#nexa-autotrade-widget[data-state="running"] .nexa-logo-svg {
-  filter:
-    drop-shadow(0 0 7px rgba(167, 139, 250, 0.95))
-    drop-shadow(0 0 20px rgba(96, 165, 250, 0.6));
+#nexa-autotrade-widget[data-state="running"] .nexa-logo {
+  box-shadow: 0 0 30px rgba(139, 92, 246, 0.7), 0 0 10px rgba(96, 165, 250, 0.4);
 }
 
 /* ---- the name --------------------------------------------------------- */
@@ -159,20 +172,6 @@
   background-clip: text;
   color: transparent;
   -webkit-text-fill-color: transparent;
-  /* A gradient clipped to text kills text-shadow, so the halo goes on a
-     blurred copy behind it. */
-  position: relative;
-}
-
-#nexa-autotrade-widget .nexa-name::before {
-  content: attr(data-name);
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  color: #a78bfa;
-  -webkit-text-fill-color: #a78bfa;
-  filter: blur(7px);
-  opacity: 0.75;
 }
 
 /* ---- the pill: Tap to run / Running and the status in one -------------- */
@@ -238,7 +237,8 @@
   animation: nexa-pulse 1.4s ease-out infinite;
 }
 
-/* The whole card breathes while the bot is live. */
+/* The whole card breathes while the bot is live (desktop only — see the
+   touch-screen block, where a per-frame shadow repaint is not affordable). */
 #nexa-autotrade-widget[data-state="running"] .nexa-card {
   animation: nexa-breathe 2.8s ease-in-out infinite;
 }
@@ -272,13 +272,10 @@
 
 /* ---- the caption ------------------------------------------------------- */
 
-/* Romio shows logo · name · pill and nothing else, so the account/record line
-   stays out of the way — it surfaces only when something needs explaining
-   (a refusal, or the live-account second tap), where the 14-char pill alone
-   is not enough. The text is kept up to date either way, so `selftest` and
-   the smoke test can still read it. */
+/* Account badge · W-L · the one-line reason. Two lines at most; the full
+   readout lives on the pill's tooltip. */
 #nexa-autotrade-widget .nexa-caption {
-  display: none;
+  display: -webkit-box;
   max-width: 120px;
   font-size: 10px;
   font-weight: 600;
@@ -292,11 +289,6 @@
   overflow: hidden;
 }
 
-#nexa-autotrade-widget[data-state="error"] .nexa-caption,
-#nexa-autotrade-widget[data-state="confirm"] .nexa-caption {
-  display: -webkit-box;
-}
-
 /* ---- the BUY / SELL flash ------------------------------------------------ */
 
 .nexa-flash {
@@ -308,9 +300,7 @@
   padding: 18px 46px;
   border-radius: 22px;
   border: 2.5px solid currentColor;
-  background: rgba(8, 12, 24, 0.82);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
+  background: rgba(8, 12, 24, 0.9);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", Helvetica, Arial, sans-serif;
   font-size: clamp(32px, 11vw, 54px);
   font-weight: 800;
@@ -395,8 +385,75 @@
   #nexa-autotrade-widget .nexa-card,
   #nexa-autotrade-widget .nexa-ring-a,
   #nexa-autotrade-widget .nexa-ring-b,
+  #nexa-autotrade-widget .nexa-ring-a-spin,
   #nexa-autotrade-widget .nexa-ring-b-spin,
   .nexa-flash--pop {
     animation: none !important;
+  }
+}
+
+/* ---- touch screens: the Android app and mobile web ----------------------- */
+
+/* A phone has no room for a big card: it used to be 208px wide and ~330px
+   tall — more than half the screen over the chart. Same square card, same
+   parts (logo · name · pill · caption), scaled to about 136×150px: the pill
+   stays the tap target at 36px tall, the caption drops to one line.
+
+   The rings keep their motion (slow drift idle, fast spin running) — at
+   54px they repaint a tiny area and, with no filter on the SVG, cost
+   little. The breathing card shadow is the one thing dropped here: a
+   150px shadow repainted every frame over a live chart did show. */
+@media (pointer: coarse) {
+  #nexa-autotrade-widget {
+    width: 136px;
+    font-size: 11px;
+  }
+
+  #nexa-autotrade-widget .nexa-card {
+    gap: 5px;
+    padding: 9px 8px 8px;
+    border-radius: 20px;
+  }
+
+  #nexa-autotrade-widget[data-state="running"] .nexa-card {
+    animation: none;
+    box-shadow:
+      0 18px 44px rgba(0, 0, 0, 0.58),
+      0 0 30px rgba(139, 92, 246, 0.45),
+      inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  }
+
+  #nexa-autotrade-widget .nexa-logo,
+  #nexa-autotrade-widget .nexa-logo-svg {
+    width: 54px;
+    height: 54px;
+  }
+
+  #nexa-autotrade-widget .nexa-name {
+    font-size: 11.5px;
+  }
+
+  #nexa-autotrade-widget .nexa-pill {
+    min-width: 108px;
+    max-width: 120px;
+    min-height: 36px;
+    padding: 8px 10px;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+  }
+
+  #nexa-autotrade-widget .nexa-caption {
+    max-width: 120px;
+    font-size: 9.5px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
+  }
+
+  .nexa-flash {
+    padding: 12px 30px;
+    border-radius: 18px;
+    font-size: clamp(28px, 9vw, 44px);
   }
 }

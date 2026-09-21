@@ -37,11 +37,8 @@
     if (!bridgeNonce) return;
     try {
       window.postMessage({ __nexa: true, nonce: bridgeNonce, ...payload }, targetOrigin());
-    } catch (error) {
-      // Never let the hook interfere with the trading site
-      if (error.name !== 'SecurityError') {
-        console.debug('[Nexa] Post message error:', error);
-      }
+    } catch (_) {
+      // Ignore security errors or postMessage restrictions silently
     }
   };
 
@@ -63,8 +60,7 @@
     let text;
     try {
       text = decoder.decode(buffer);
-    } catch (error) {
-      console.debug('[Nexa] Failed to decode buffer:', error);
+    } catch (_) {
       return null;
     }
     const start = text.search(/[\[{]/);
@@ -72,8 +68,7 @@
     const candidate = text.slice(start).replace(/\0+$/, '');
     try {
       return JSON.parse(candidate);
-    } catch (error) {
-      console.debug('[Nexa] Failed to parse JSON:', error);
+    } catch (_) {
       return null;
     }
   }
@@ -300,23 +295,15 @@
       const parsed = new URL(String(url), window.location.href);
       return (parsed.protocol === 'ws:' || parsed.protocol === 'wss:') &&
         /\/socket\.io(?:\/|$)/i.test(parsed.pathname);
-    } catch (error) {
-      console.debug('[Nexa] Invalid WebSocket URL:', url, error);
+    } catch (_) {
       return false;
     }
   }
 
-  // A Proxy preserves native static members and instanceof semantics better than
-  // a hand-written replacement constructor.
+  // A Proxy preserves native static members, prototype chain, and instanceof semantics.
   const PatchedWebSocket = new Proxy(NativeWebSocket, {
     construct(Target, args, newTarget) {
-      let socket;
-      try {
-        socket = Reflect.construct(Target, args, newTarget === PatchedWebSocket ? Target : newTarget);
-      } catch (error) {
-        console.error('[Nexa] WebSocket construction failed:', error);
-        throw error;
-      }
+      const socket = Reflect.construct(Target, args, newTarget === PatchedWebSocket ? Target : newTarget);
       if (args[0] && isSocketIoConnection(args[0])) {
         socketSeq += 1;
         seqOf.set(socket, socketSeq);
@@ -327,7 +314,14 @@
       }
       return socket;
     },
+    apply(Target, thisArg, args) {
+      return Reflect.apply(Target, thisArg, args);
+    },
   });
+
+  try {
+    NativeWebSocket.prototype.constructor = PatchedWebSocket;
+  } catch (_) {}
 
   window.WebSocket = PatchedWebSocket;
 })();

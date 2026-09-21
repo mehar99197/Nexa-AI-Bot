@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Framework Material theme (no AppCompat dependency): the same navy as
+         the widget behind both WebViews, so a loading page does not flash. -->
+    <style name="Theme.Nexa" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/nexa_bg</item>
+        <item name="android:statusBarColor">@color/nexa_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:navigationBarColor">@color/nexa_bg</item>
+        <item name="android:colorPrimary">@color/nexa_accent</item>
+        <item name="android:colorAccent">@color/nexa_accent</item>
+        <item name="android:textColorPrimary">@color/nexa_text</item>
+    </style>
+
+    <!-- The trading page: identical today, kept as its own style so the two
+         screens can drift apart without touching each other. -->
+    <style name="Theme.Nexa.Trade">
+        <item name="android:windowBackground">@color/nexa_trade_bg</item>
+        <item name="android:statusBarColor">@color/nexa_trade_bg</item>
+    </style>
+</resources>

@@ -2,3 +2,15 @@ node_modules/
 package-lock.json
 *.log
 .DS_Store
+recordings/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/app/*.iml
+android/app/src/main/assets/bot/
+android/keystore.properties
+android/*.keystore
+android/*.jks

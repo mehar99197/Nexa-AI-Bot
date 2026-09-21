@@ -197,9 +197,68 @@
     return best;
   }
 
+  /**
+   * Fractional Kelly stake for a binary option.
+   *
+   * A contract paying b (payout fraction, 0.85 at 85%) on a win and -1 on a
+   * loss, hit at rate p, has the growth-optimal stake f* = p - (1 - p) / b of
+   * the balance. That is optimal only if p is exactly right — and p is an
+   * estimate, so `fraction` (0.25 = quarter Kelly) scales it down, `maxPct`
+   * caps it, and the result never drops below `minStake` (the platform
+   * minimum). A hit-rate that is unknown or below break-even sizes to the
+   * minimum rather than zero: whether to trade at all was decided upstream
+   * by the strategy gates; sizing is not a second vote, it only decides how
+   * much evidence-backed money rides on an entry.
+   *
+   * Pass the LOWER confidence bound as the hit-rate, not the observed
+   * ratio — a lucky 60%/20 must not be sized like a proven 60%/300.
+   * @param {{balance: number, payoutPct: number, hitRate: number|null,
+   *          fraction: number, maxPct: number, minStake: number}} args
+   * @returns {number|null} dollars (2 decimals), or null when the balance or
+   *   payout is unknown — the caller then leaves the platform's amount alone
+   */
+  function kellyStake(args) {
+    if (!args || typeof args !== 'object') return null;
+    const { balance, payoutPct, hitRate, fraction, maxPct, minStake } = args;
+    if (!Number.isFinite(balance) || balance <= 0 ||
+        !Number.isFinite(payoutPct) || payoutPct <= 0 ||
+        !Number.isFinite(fraction) || fraction <= 0 ||
+        !Number.isFinite(maxPct) || maxPct <= 0 ||
+        !Number.isFinite(minStake) || minStake <= 0) {
+      return null;
+    }
+    const floor = Math.round(minStake * 100) / 100;
+    if (!Number.isFinite(hitRate) || hitRate <= 0 || hitRate >= 1) return floor;
+    const b = payoutPct / 100;
+    const full = hitRate - (1 - hitRate) / b;
+    if (full <= 0) return floor;
+    const f = Math.min(full * fraction, maxPct / 100);
+    return Math.max(floor, Math.round(balance * f * 100) / 100);
+  }
+
+  /**
+   * The amount at or below `amount` that a person would type into the stake
+   * field: 1 2 3 5 under ten, then 10 15 20 25 30 40 50 75 100 150 … (the
+   * same mantissas every decade). Never below `minStake`, the platform
+   * minimum, which may itself be any figure. A sizer that asks for $2.37
+   * one trade and $2.64 the next is a machine; $2 is a person.
+   */
+  function humanStake(amount, minStake) {
+    const floor = Number.isFinite(minStake) && minStake > 0 ? Math.round(minStake * 100) / 100 : 0.01;
+    if (!Number.isFinite(amount) || amount <= floor) return floor;
+    const eps = 1e-9;
+    if (amount < 10) {
+      const pick = [5, 3, 2, 1].find((v) => v <= amount + eps);
+      return Math.max(floor, pick === undefined ? floor : pick);
+    }
+    const decade = Math.pow(10, Math.floor(Math.log10(amount)));
+    const mantissa = [7.5, 5, 4, 3, 2.5, 2, 1.5, 1].find((v) => v <= amount / decade + eps) || 1;
+    return Math.max(floor, Math.round(mantissa * decade * 100) / 100);
+  }
+
   const api = Object.freeze({
     efficiencyRatio, percentile, gapFreeSuffix, settlePendings, recordOutcome,
-    statsOf, breakEvenRate, wilsonLowerBound, bestQualified,
+    statsOf, breakEvenRate, wilsonLowerBound, bestQualified, kellyStake, humanStake,
   });
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;

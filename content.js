@@ -2,11 +2,13 @@
    Nexa AutoTrade Bot — content script (ISOLATED world)
 
    Sections:
-     0. CONFIG             <- the only place behaviour is configured (no settings UI)
+     0. CONFIG             <- defaults; the popup (popup.js) overrides the
+                              user-facing subset listed in settings.js
      1. UI                 (one card: logo, name, Start/Stop pill, caption; BUY/SELL flash)
      2. Price feed         (quotes relayed from inject.js)
      2b. Tick recorder     (IndexedDB journal + JSON export for tools/backtest.js)
-     2c. Multi-asset scanner (per-symbol buffers: setup ranking + warm starts)
+     2c. Multi-asset scanner (per-symbol buffers: setup ranking + warm starts,
+                              plus the candle series the HTF filter reads)
      3. Element resolution (finding the Up / Down buttons robustly)
      3b. Trade panel       (payout % and expiry read from the page)
      4. Trade execution    (clicking Call / Put)
@@ -14,6 +16,7 @@
      5b. Auto mode         (self-calibrating shadow scoreboard)
      6. Bot loop           (start / stop / tick)
      7. Wiring + debug helpers (globalThis.__nexaDebug in the isolated world)
+     7b. Settings + popup channel (chrome.storage prefs, runtime messages)
 
    NOTE: the price does NOT come from the DOM. Quotex renders the chart to a
    single <canvas>, so there is nothing to scrape. inject.js runs in the MAIN
@@ -35,7 +38,8 @@
   const POSITION_KEY = 'nexa.autotrade.position';
   const DRY_RUN_KEY = 'nexa.autotrade.dryrun';
   const REC_KEY = 'nexa.autotrade.record';
-  const SETTINGS_KEY = 'nexa.autotrade.settings';
+  const SETTINGS_KEY = 'nexa.autotrade.settings';   // legacy (removed at boot)
+  const PREFS_KEY = NexaSettings.SETTINGS_KEY;        // what the popup writes
   const DAILY_KEY = 'nexa.autotrade.daily';
   // Scoreboards: v2 — the v1 records were scored against a bar that a coin
   // flip cleared (see autopilot.js bestQualified) and with seed-biased EMAs,
@@ -45,7 +49,21 @@
 
   // Guard against multiple instances - check this FIRST
   if (window.__nexaBotLoaded) return;
-  window.__nexaBotLoaded = true;
+
+  // The few globals this file leaves on window are defined non-enumerable.
+  // In the extension the isolated world hides them from the page anyway;
+  // in the Android app the page shares the world, and a walk of
+  // Object.keys(window) is a common way to look for injected tooling. A
+  // property that does not enumerate is not found that way (the modules —
+  // NexaStrategy and friends — already define themselves like this).
+  const hiddenGlobal = (name, value) => {
+    try {
+      Object.defineProperty(globalThis, name, { value, writable: true, configurable: true, enumerable: false });
+    } catch (_) {
+      globalThis[name] = value;   // a non-configurable leftover: plain assignment still works
+    }
+  };
+  hiddenGlobal('__nexaBotLoaded', true);
 
   /* =======================================================================
      0a. Storage
@@ -358,6 +376,28 @@
     // tools/backtest.js shows it helps on YOUR recorded feed.
     ENTRY_WINDOW_SEC: 0,
 
+    // ---- Higher-timeframe context (candles.js) ----
+
+    // Every model above looks at ~300 ticks — about 2.5 minutes. Candles
+    // rebuilt from the same feed (per symbol, since the page loaded) give
+    // the trade a longer view: with HTF_FILTER on, a click AGAINST the
+    // candle trend (fast EMA of closes vs slow) is held, and so is a buy
+    // into an overbought RSI or a sell into an oversold one (HTF_RSI_BLOCK
+    // and its mirror 100 - HTF_RSI_BLOCK; 0 disables that gate). The filter
+    // stands aside while the candles are still warming up (HTF_EMA_SLOW + 1
+    // closed candles: ~22 minutes on the page at 1m), so a fresh start still
+    // trades — the status says "warming". The instant entry and the
+    // keep-trading fallback are held by it too: those follow the SHORT
+    // trend, which is exactly the entry a longer trend runs over.
+    // tools/backtest.js --htf replays the same gate on a recording; turn
+    // this off if it does not help on YOUR feed.
+    HTF_FILTER: true,
+    HTF_CANDLE_SEC: 60,
+    HTF_EMA_FAST: 8,
+    HTF_EMA_SLOW: 21,
+    HTF_RSI_PERIOD: 14,
+    HTF_RSI_BLOCK: 70,
+
     // ---- Alerts & money management ----
 
     // Signal-only: never click — flash the arrow on the widget (and beep)
@@ -365,18 +405,58 @@
     SIGNAL_ONLY: false,
     ALERT_SOUND: true,
 
-    // Stake sizing before each click: 'off' leaves the platform's amount
-    // field alone; 'fixed' writes STAKE_VALUE dollars; 'percent' writes
-    // STAKE_VALUE percent of the demo balance. Best-effort — if the amount
-    // input can't be found the trade still goes through unchanged.
-    STAKE_MODE: 'off',
+    // Stake sizing before each click (the amount is written into the
+    // platform's field; best-effort — if the input can't be found the trade
+    // goes through with whatever is set):
+    //   'off'     leave the platform's amount alone
+    //   'fixed'   STAKE_VALUE dollars every trade
+    //   'percent' STAKE_VALUE percent of the balance of the account traded
+    //   'kelly'   (default) fractional Kelly on MEASURED evidence: the
+    //             qualified variant's Wilson lower bound (auto mode) or the
+    //             session record once it has 30 decided trades. Where there
+    //             is no evidence — the instant entry after Start, the
+    //             keep-trading fallback, an unproven model — the stake is
+    //             STAKE_MIN. So the money scales with proof and the coin-flip
+    //             entries ride the minimum. KELLY_FRACTION 0.25 = quarter
+    //             Kelly (full Kelly assumes the hit-rate is exactly known);
+    //             STAKE_MAX_PCT caps any single stake.
+    STAKE_MODE: 'kelly',
     STAKE_VALUE: 1,
+    STAKE_MIN: 1,
+    KELLY_FRACTION: 0.25,
+    STAKE_MAX_PCT: 5,
+    // Human-looking stakes. The sizer's figure (kelly, percent) is rounded
+    // DOWN to a value a person types — 1 2 3 5 10 15 20 25 30 40 50 75 100 …
+    // — and the amount field is left alone while it already holds a figure
+    // within STAKE_STICKY_PCT of the new one: nobody retypes $2 as $2.40
+    // forty times an hour, and a stake that drifts by cents every trade is
+    // a machine's signature the server can read. A fixed stake is the
+    // user's own number and is used as typed.
+    STAKE_HUMAN: true,
+    STAKE_STICKY_PCT: 30,
 
-    // Circuit breakers. DAILY_LOSS_CAP stops the bot (and refuses restarts)
-    // once today's realized P&L reaches -cap dollars; 0 disables.
-    // MAX_LOSS_STREAK stops after N consecutive losses; 0 disables.
+    // Daily circuit breakers, per account (a demo loss never locks the live
+    // account and the other way round), on today's REALIZED bot P&L:
+    //   DAILY_LOSS_CAP_PCT      stop for the day at -N% of the balance the
+    //                           account had when the bot first traded today
+    //   DAILY_PROFIT_TARGET_PCT stop for the day at +N% — banking a good day
+    //                           is the one edge that needs no model
+    //   DAILY_LOSS_CAP          absolute dollar cap, for accounts whose
+    //                           balance the feed does not report
+    // 0 disables each. A stopped day refuses restarts until midnight (local).
+    // MAX_LOSS_STREAK pauses (RUN_UNTIL_STOPPED) or stops after N losses in
+    // a row; 0 disables.
+    DAILY_LOSS_CAP_PCT: 10,
+    DAILY_PROFIT_TARGET_PCT: 20,
     DAILY_LOSS_CAP: 0,
     MAX_LOSS_STREAK: 4,
+
+    // Journal every streaming tick to IndexedDB for tools/backtest.js (see
+    // section 2b). Off by default: a busy watchlist writes ~100 rows/s and
+    // the journal caps at 500k rows (tens of MB), so recording is a choice.
+    // Export from the popup or with __nexaDebug.exportTicks(), drop the file
+    // into recordings/, then `npm run backtest -- --walk-forward`.
+    RECORD_TICKS: false,
 
     // Manual instrument override, e.g. 'AUDNZD_otc'. Leave null and the bot
     // locks onto whichever chart is actually open, reading the asset title from
@@ -387,7 +467,49 @@
 
     // How often to re-read the chart title from the DOM (ms).
     SYMBOL_RECHECK_MS: 2000,
+
+    // Humanized timing & stealth
+    MAX_TRADES_PER_HOUR: 20,           // max trades in a rolling 60 min window (0 = unlimited)
+    REST_CYCLE_ENABLED: true,          // take periodic human rest breaks
+    SESSION_WORK_MINUTES: 25,          // active trading work interval before a rest
+    SESSION_WORK_JITTER_MIN: 5,        // +/- random variation on work interval
+    REST_BREAK_MINUTES: 5,             // rest break duration
+    REST_BREAK_JITTER_MIN: 2,          // +/- random variation on break duration
+    REACTION_DELAY: true,              // natural reaction delay on algorithmic signals
+    REACTION_DELAY_MIN_MS: 800,        // min reaction delay (read the signal, move the thumb)
+    REACTION_DELAY_MAX_MS: 2000,       // max reaction delay
+    // The click as a person makes it (see "Humanized input" below): the
+    // mouse travels to the button and rests on it, the press is held, the
+    // stake is typed key by key; a finger lands and lifts. Off = the
+    // instant synthetic sequence (every event in the same millisecond).
+    HUMAN_CLICK: true,
+    COOLDOWN_JITTER_MIN_MS: 1_000,     // min jitter added to cooldown
+    COOLDOWN_JITTER_MAX_MS: 5_000,     // max jitter added to cooldown
+    // People miss signals; a bot that takes every one it sees trades on a
+    // rhythm no person keeps. This share of model signals is let go on
+    // purpose, and a missed signal then rests for one cooldown as a taken
+    // trade would (so a level-type signal is not simply caught on the next
+    // tick). The entry after Start and the keep-trading fallback are not
+    // signals and are never skipped; Signal-only never skips an alert.
+    // 0 = take every signal.
+    SKIP_SIGNAL_PCT: 15,
+
+    // Platform alarm. When the platform itself looks alarmed — a captcha or
+    // human check, a notice about unusual or automated activity, a blocked
+    // or suspended account, a forced re-login — the run stops on the spot,
+    // the pill says ALARM and Start is refused while it lasts. Trading on
+    // through a challenge is how a suspicious session becomes a closed
+    // account; use the platform by hand for a while instead. The page is
+    // swept every PLATFORM_ALARM_EVERY_MS, running or not.
+    PLATFORM_ALARM: true,
+    PLATFORM_ALARM_EVERY_MS: 3_000,
   };
+
+  // The defaults of the knobs the popup can change (settings.js SCHEMA),
+  // captured before anything touches CONFIG: a removed override goes back
+  // to exactly this, not to whatever applyHorizon left behind.
+  const USER_DEFAULTS = {};
+  for (const row of NexaSettings.SCHEMA) USER_DEFAULTS[row.key] = CONFIG[row.key];
 
   // Horizon presets and the auto-mode variant pool live in horizons.js so
   // tools/backtest.js replays exactly the windows the live bot runs for a
@@ -459,11 +581,13 @@
 
   const ICONS = {
     // The brand mark: a hand-drawn double scribble ring (its two loops drift
-    // in opposite directions, and the faint back loop spins fast while the
-    // bot runs — see .nexa-ring-a / .nexa-ring-b / .nexa-ring-b-spin in
-    // style.css) around a neon tile with a robot face. One gradient, `nexa-g`, paints
-    // every stroke; the id is safe because the whole widget lives in a closed
-    // shadow root, where it cannot collide with the page's own defs.
+    // slowly in opposite directions, and both spin fast while the bot runs —
+    // see .nexa-ring-a / .nexa-ring-b and the *-spin groups in style.css)
+    // around a navy tile with a robot face. One blue→violet→pink
+    // gradient, `nexa-g`, paints every stroke; the id is safe because the
+    // whole widget lives in a closed shadow root, where it cannot collide
+    // with the page's own defs. tools/make-icons.js renders the same literal
+    // into the extension and Android icons.
     LOGO: '<svg class="nexa-logo-svg" viewBox="0 0 100 100" aria-hidden="true">' +
       // userSpaceOnUse, not the objectBoundingBox default: the antenna stem and
       // the mouth are straight lines, and a bounding box of zero width or
@@ -473,16 +597,18 @@
       ' x1="10" y1="10" x2="90" y2="90">' +
       '<stop offset="0" stop-color="#60a5fa"/><stop offset=".52" stop-color="#a78bfa"/>' +
       '<stop offset="1" stop-color="#f0abfc"/></linearGradient></defs>' +
-      // the scribble: two rough loops, deliberately not concentric
+      // the scribble: two rough loops, deliberately not concentric. Each
+      // loop sits in its own group: the group carries the fast "working"
+      // spin, the path keeps the slow idle drift, so start/stop only pauses
+      // or resumes the spin and a ring never jumps to a new angle
       '<g fill="none" stroke="url(#nexa-g)" stroke-linecap="round" stroke-linejoin="round">' +
+      '<g class="nexa-ring-a-spin">' +
       '<path class="nexa-ring-a" stroke-width="2.6" opacity=".9" d="M31 13' +
       ' C19 13.6 13.2 20.4 12.6 31.4 C12 42.4 12 56.6 12.9 68' +
       ' C13.8 79.6 20.4 87.4 32 88 C44 88.6 57 88.3 68 87.4' +
       ' C79.8 86.5 87.5 79.8 88 68 C88.5 56 88.4 43 87.6 31' +
       ' C86.8 19.2 80 12.8 68 12.5 C56.4 12.2 42.6 12.4 31 13"/>' +
-      // the back loop sits in its own group: the group carries the fast
-      // "working" spin, the path keeps the idle drift, so start/stop only
-      // pauses or resumes the spin and the ring never jumps
+      '</g>' +
       '<g class="nexa-ring-b-spin">' +
       '<path class="nexa-ring-b" stroke-width="2" opacity=".55" d="M35 9.6' +
       ' C21.6 10.6 10.8 18.2 9.8 31.2 C8.8 44.2 9.1 58.2 10.3 70.2' +
@@ -509,13 +635,11 @@
   };
 
   /**
-   * One card, Romio-style: the scribble-ring logo, the name, and a single
-   * pill that is Start/Stop and the status readout in one. The caption
-   * (account · W-L · why) is kept current but CSS only reveals it when the
-   * pill alone cannot explain itself — a refusal, or the live-account
-   * second tap.
-   * Plus a BUY/SELL flash in the middle of the screen when a trade goes in.
-   * No panels, no settings, no toggles — CONFIG is the configuration.
+   * One card: the scribble-ring logo, the name, a single pill that is
+   * Start/Stop and the status readout in one, and a two-line caption
+   * (account · W-L · why) underneath. Plus a BUY/SELL flash in the middle of
+   * the screen when a trade goes in. No panels, no settings, no toggles —
+   * the popup (popup.js) is where the knobs live.
    */
   function buildWidget() {
     const root = el('div');
@@ -531,9 +655,6 @@
     logo.appendChild(svgEl(ICONS.LOGO));
 
     const name = el('div', 'nexa-name', 'Nexa AI Bot');
-    // .nexa-name::before renders this again, blurred, as the neon halo —
-    // a gradient clipped to text cannot carry a text-shadow.
-    name.dataset.name = 'Nexa AI Bot';
 
     const pill = el('button', 'nexa-pill');
     pill.type = 'button';
@@ -661,14 +782,34 @@
 
   // For selftest.js only. This is the ISOLATED world's global — page scripts
   // cannot see it; the DevTools console has to be switched to the extension's
-  // context to reach it.
-  globalThis.__nexaWidgetRoot = ui.shadow;
+  // context to reach it. (In the Android app it is on the page's own window,
+  // hence hidden from enumeration.)
+  hiddenGlobal('__nexaWidgetRoot', ui.shadow);
 
   // The stylesheet is a web-accessible resource fetched into the shadow root
   // — manifest `css` injection only ever reaches the light DOM. Until it
   // lands (a few ms, before first paint on a document_start script) the
   // widget is unstyled but harmless.
   (function loadWidgetStyles() {
+    const apply = (css) => {
+      if (typeof CSSStyleSheet === 'function' && 'adoptedStyleSheets' in ui.shadow) {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(css);
+        ui.shadow.adoptedStyleSheets = [sheet];
+      } else {
+        const styleEl = document.createElement('style');
+        styleEl.textContent = css;
+        ui.shadow.insertBefore(styleEl, ui.shadow.firstChild);
+      }
+    };
+    // The Android wrapper (android/) hands the stylesheet over as text before
+    // this script runs: a fetch from the page's own origin is subject to the
+    // site's CSP, and there is no extension origin to fetch from anyway.
+    if (typeof globalThis.__nexaInlineStyle === 'string') {
+      apply(globalThis.__nexaInlineStyle);
+      try { delete globalThis.__nexaInlineStyle; } catch (_) { /* leave it */ }   // used once; nothing to find later
+      return;
+    }
     let url = null;
     try {
       url = typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL
@@ -676,17 +817,7 @@
     } catch (_) { /* no extension context */ }
     if (!url) return;
     fetch(url).then((response) => response.ok ? response.text() : Promise.reject(response.status))
-      .then((css) => {
-        if (typeof CSSStyleSheet === 'function' && 'adoptedStyleSheets' in ui.shadow) {
-          const sheet = new CSSStyleSheet();
-          sheet.replaceSync(css);
-          ui.shadow.adoptedStyleSheets = [sheet];
-        } else {
-          const styleEl = document.createElement('style');
-          styleEl.textContent = css;
-          ui.shadow.insertBefore(styleEl, ui.shadow.firstChild);
-        }
-      })
+      .then(apply)
       .catch((error) => console.error('[AutoTrade] Widget stylesheet failed to load:', error));
   })();
 
@@ -794,6 +925,7 @@
     [/identifying chart/i, 'CHART? RETRY'],
     [/chart not identified/i, 'NO CHART'],
     [/daily loss cap/i, 'DAILY CAP'],
+    [/daily profit target/i, 'TARGET HIT'],
     [/loading/i, 'LOADING'],
     [/trade limit/i, 'LIMIT'],
     [/clicks not registering/i, 'NO CLICKS'],
@@ -802,6 +934,7 @@
     [/account changed/i, 'ACCOUNT?'],
     [/losses in a row/i, 'LOSSES'],
     [/extension broken/i, 'BROKEN'],
+    [/platform alarm/i, 'ALARM'],
   ];
 
   function shortReason(message) {
@@ -836,8 +969,54 @@
     ui.caption.textContent = text;
   }
 
-  const log = (...args) =>
+  // The last LOG_KEEP lines, for the popup's Log tab and its export. On a
+  // phone the console is out of reach (the release app allows no remote
+  // inspection), so the bot keeps its own tail.
+  const LOG_KEEP = 300;
+  const logLines = [];   // [{ n, t, text }], oldest first
+  let logSeq = 0;
+  const logText = (value) => {
+    if (value instanceof Error) return value.message;
+    if (typeof value === 'object' && value !== null) {
+      try { return JSON.stringify(value); } catch (_) { return String(value); }
+    }
+    return String(value);
+  };
+
+  const log = (...args) => {
     console.log('%c[AutoTrade]', 'color:#22c55e;font-weight:bold', ...args);
+    logLines.push({ n: ++logSeq, t: Date.now(), text: args.map(logText).join(' ') });
+    if (logLines.length > LOG_KEEP) logLines.splice(0, logLines.length - LOG_KEEP);
+  };
+
+  /**
+   * What the page — and, through the User-Agent, the server — can tell
+   * about where the site is running. Logged first thing, so the Log tab
+   * answers "does Quotex see a PC or a phone?" at a glance: the UA and
+   * platform are what the server is told, the screen, touch points and GPU
+   * are what a script on the page can see.
+   */
+  function environmentLine() {
+    const n = navigator;
+    let gpu = 'n/a';
+    try {
+      if (typeof WebGLRenderingContext === 'function') {
+        const gl = document.createElement('canvas').getContext('webgl');
+        const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
+        if (gl && info) gpu = String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL));
+      }
+    } catch (_) { /* no WebGL here */ }
+    const hints = n.userAgentData
+      ? 'mobile=' + n.userAgentData.mobile + ' platform=' + n.userAgentData.platform +
+        ' brands=' + (Array.isArray(n.userAgentData.brands)
+          ? n.userAgentData.brands.map((entry) => entry.brand + ' ' + entry.version).join(', ') : '?')
+      : 'none';
+    return 'Environment: UA "' + n.userAgent + '" | platform ' + n.platform +
+      ' | client hints ' + hints +
+      ' | screen ' + screen.width + 'x' + screen.height + ' @' + (window.devicePixelRatio || 1) +
+      ' | touch points ' + (n.maxTouchPoints || 0) + ' | GPU ' + gpu +
+      ' | running in ' + (typeof globalThis.__nexaNativeTap === 'function' ? 'the Android app' : 'the Chrome extension');
+  }
 
   // The pure modules load ahead of this file from the same manifest entry.
   // If one is missing, the sections below would throw a ReferenceError
@@ -1243,12 +1422,11 @@
 
   const recorder = {
     db: null,
-    // Persisted under REC_KEY; mirrored by the widget button. OFF for a fresh
+    // Follows CONFIG.RECORD_TICKS (the popup persists it). OFF for a fresh
     // install: at ~100 rows/s across a watchlist the journal reaches its
     // 500k-row cap (tens of MB in the profile) within hours, and a passive
-    // default that writes that much deserves an explicit opt-in. Anyone who
-    // already switched it on keeps it on.
-    enabled: false,
+    // default that writes that much deserves an explicit opt-in.
+    enabled: CONFIG.RECORD_TICKS,
     buffer: [],        // ticks awaiting the next flush
     count: 0,          // approximate rows in the ticks store
     exporting: false,
@@ -1420,6 +1598,13 @@
   }
 
   function downloadBlob(blob, filename) {
+    // The Android wrapper has no download manager for blob: URLs; it takes
+    // the text and writes the file into the phone's Downloads folder.
+    if (typeof globalThis.__nexaSaveFile === 'function') {
+      blob.text().then((text) => globalThis.__nexaSaveFile(filename, text))
+        .catch((error) => log('Export failed:', error));
+      return;
+    }
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
@@ -1466,8 +1651,9 @@
      instead of starting cold (instant warm start).
      ======================================================================= */
 
-  const scanner = new Map();   // normalized key -> {sym, samples: [{t, price}]}
+  const scanner = new Map();   // normalized key -> {sym, samples: [{t, price}], htf}
   const SCANNER_KEEP = 120;    // ~1 minute of ~2Hz ticks per symbol
+  const HTF_KEEP = 240;        // closed candles per symbol (4 hours at 1m)
 
   function scannerRecord(symbol, t, price) {
     const key = normalizeSymbol(symbol);
@@ -1482,11 +1668,39 @@
           if (candidate !== symbolLock.key) { scanner.delete(candidate); break; }
         }
       }
-      entry = { sym: symbol, samples: [] };
+      entry = { sym: symbol, samples: [], htf: null };
       scanner.set(key, entry);
     }
     entry.samples.push({ t, price });
     if (entry.samples.length > SCANNER_KEEP) entry.samples.shift();
+    // The candle series for the HTF filter. Candles survive feed gaps and
+    // chart switches (they are per symbol and coarse enough not to care);
+    // a period change from the popup starts the series over.
+    const periodMs = CONFIG.HTF_CANDLE_SEC * 1000;
+    if (entry.htf === null || entry.htf.periodMs !== periodMs) {
+      entry.htf = NexaCandles.createSeries(periodMs, HTF_KEEP);
+    }
+    NexaCandles.push(entry.htf, t, price);
+  }
+
+  /** The higher-timeframe read for the locked chart (see CONFIG.HTF_FILTER). */
+  function htfView() {
+    const entry = symbolLock.key ? scanner.get(symbolLock.key) : null;
+    return NexaCandles.bias(entry ? entry.htf : null, {
+      fast: CONFIG.HTF_EMA_FAST,
+      slow: CONFIG.HTF_EMA_SLOW,
+      rsiPeriod: CONFIG.HTF_RSI_PERIOD,
+      rsiBlock: CONFIG.HTF_RSI_BLOCK,
+    });
+  }
+
+  /** "1m ↑ rsi 58" / "1m warming 7/22" for the status readout. */
+  function htfLabel(view) {
+    const period = CONFIG.HTF_CANDLE_SEC % 60 === 0
+      ? (CONFIG.HTF_CANDLE_SEC / 60) + 'm' : CONFIG.HTF_CANDLE_SEC + 's';
+    if (!view.warm) return period + ' warming ' + view.candles + '/' + view.needed;
+    return period + ' ' + (view.dir === 'UP' ? '↑' : view.dir === 'DOWN' ? '↓' : '→') +
+      (view.rsi === null ? '' : ' rsi ' + Math.round(view.rsi));
   }
 
   /** Gap-free recent samples for a symbol — safe to seed a history from. */
@@ -1927,43 +2141,692 @@
   }
 
   /**
-   * Dispatch a full pointer+mouse sequence. A bare element.click() fires only
-   * a 'click' event, which many trading UIs ignore because they listen on
-   * pointerdown/mousedown instead.
+   * Android app: tap the screen for real where the element is. shim.js routes
+   * this to Bridge.tap, which sends finger-down / finger-up MotionEvents
+   * through the WebView, so the page sees the trusted touch a finger makes
+   * rather than a synthetic click (every event simulateClick builds is
+   * `isTrusted: false`, which a page can read in one line). Returns the ms
+   * until the finger lifts — the app queues the tap behind any typing still
+   * going out, with a pause between — or null, and the caller falls back to
+   * synthetic events: without the app, with the point off the screen, or
+   * with something else drawn over the element there (a real tap would land
+   * on that instead).
+   */
+  function nativeTap(element, clientX, clientY) {
+    const tap = globalThis.__nexaNativeTap;
+    if (typeof tap !== 'function') return null;
+    let hit = null;
+    try { hit = document.elementFromPoint(clientX, clientY); } catch (_) { hit = null; }
+    if (!hit || !element.contains(hit)) {
+      log('Native tap skipped — the button is covered or off the viewport; sending synthetic events instead.');
+      return null;
+    }
+    // Client coordinates are layout-viewport CSS px. The screen shows the
+    // visual viewport (pinch zoom and pan) at page scale × device pixel
+    // ratio, and that is the space a MotionEvent lives in.
+    const vv = window.visualViewport;
+    const vx = clientX - (vv ? vv.offsetLeft : 0);
+    const vy = clientY - (vv ? vv.offsetTop : 0);
+    if (vv && (vx < 0 || vy < 0 || vx >= vv.width || vy >= vv.height)) {
+      log('Native tap skipped — the button is outside the visible (zoomed) area; sending synthetic events instead.');
+      return null;
+    }
+    const scale = (vv && vv.scale > 0 ? vv.scale : 1) * (window.devicePixelRatio || 1);
+    let result = null;
+    try { result = tap(vx * scale, vy * scale); } catch (_) { result = null; }
+    // The bridge answers with the ms until the finger lifts (older shims: true).
+    const ms = result === true ? 0
+      : (typeof result === 'number' && Number.isFinite(result) && result >= 0 ? Math.round(result) : null);
+    if (ms === null) log('Native tap unavailable — sending synthetic events instead.');
+    return ms;
+  }
+
+  /**
+   * Dispatch the event sequence a real tap or click produces. A bare
+   * element.click() fires only a 'click' event, which many trading UIs ignore
+   * because they listen on pointerdown/mousedown instead.
+   *
+   * In the Android app the click is a real tap instead (nativeTap above) and
+   * this sequence is the fallback. The touch order is the one browsers
+   * themselves produce: pointer events, the touch events they mirror, and
+   * only once the finger has lifted the mouse-compatibility events and the
+   * click. (It used to go mouse first and touch last — an order no finger
+   * produces.)
+   *
+   * Every event here goes out in the same millisecond. With HUMAN_CLICK on
+   * (the default) trades are placed by humanClick instead, which spreads
+   * the same events over the time a hand takes; this is the instant form
+   * for HUMAN_CLICK off and for the fallback when a gesture cannot be
+   * queued.
    */
   function simulateClick(element) {
-    const rect = element.getBoundingClientRect();
+    if (!element) return;
+    const { x: clientX, y: clientY } = landingPoint(element);
+
+    if (nativeTap(element, clientX, clientY) !== null) return;
+
+    if (typeof element.dispatchEvent !== 'function') {
+      if (typeof element.click === 'function') element.click();
+      return;
+    }
+
     const base = {
       bubbles: true,
       cancelable: true,
       composed: true,
       view: window,
+      detail: 1,
       button: 0,
       buttons: 1,
-      clientX: rect.left + rect.width / 2,
-      clientY: rect.top + rect.height / 2,
+      clientX,
+      clientY,
+      screenX: clientX + (window.screenX || 0),
+      screenY: clientY + (window.screenY || 0),
+      pageX: clientX + (window.scrollX || 0),
+      pageY: clientY + (window.scrollY || 0),
     };
-    const pointer = { ...base, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+    const up = { buttons: 0 };
+    const enter = { bubbles: false };            // enter/leave events never bubble
 
-    element.dispatchEvent(new PointerEvent('pointerover', pointer));
-    element.dispatchEvent(new PointerEvent('pointerenter', pointer));
-    element.dispatchEvent(new MouseEvent('mouseover', base));
-    element.dispatchEvent(new PointerEvent('pointerdown', pointer));
-    element.dispatchEvent(new MouseEvent('mousedown', base));
-    element.dispatchEvent(new PointerEvent('pointerup', { ...pointer, buttons: 0 }));
-    element.dispatchEvent(new MouseEvent('mouseup', { ...base, buttons: 0 }));
-    element.dispatchEvent(new MouseEvent('click', { ...base, buttons: 0 }));
+    const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+    const hasPointer = typeof PointerEvent !== 'undefined';
+    const pointer = {
+      ...base,
+      pointerId: 1,
+      pointerType: isTouch ? 'touch' : 'mouse',
+      isPrimary: true,
+      width: isTouch ? 24 : 1,
+      height: isTouch ? 24 : 1,
+      pressure: 0.5,
+    };
+    const lifted = { ...up, pressure: 0 };
+
+    const mouse = (type, extra) => element.dispatchEvent(new MouseEvent(type, { ...base, ...extra }));
+    const point = (type, extra) => {
+      if (hasPointer) element.dispatchEvent(new PointerEvent(type, { ...pointer, ...extra }));
+    };
+    // Best effort: the Touch/TouchEvent constructors are not on every engine,
+    // and the pointer/mouse events around them fire either way.
+    const touch = (type, ended) => {
+      if (typeof window.Touch !== 'function' || typeof window.TouchEvent !== 'function') return;
+      try {
+        const finger = new window.Touch({
+          identifier: 1, target: element,
+          clientX, clientY, pageX: base.pageX, pageY: base.pageY,
+          screenX: base.screenX, screenY: base.screenY, radiusX: 12, radiusY: 12, force: 0.5,
+        });
+        const active = ended ? [] : [finger];
+        element.dispatchEvent(new window.TouchEvent(type, {
+          bubbles: true, cancelable: true, composed: true, view: window,
+          touches: active, targetTouches: active, changedTouches: [finger],
+        }));
+      } catch (_) { /* constructor unsupported */ }
+    };
+
+    if (isTouch) {
+      // Finger down: each pointer event, then the touch event it mirrors.
+      point('pointerover');
+      point('pointerenter', enter);
+      point('pointerdown');
+      touch('touchstart', false);
+      // Finger up. A touch pointer leaves the element as it lifts.
+      point('pointerup', lifted);
+      point('pointerout', lifted);
+      point('pointerleave', { ...lifted, ...enter });
+      touch('touchend', true);
+      // The mouse-compatibility events a tap ends with, then the click.
+      mouse('mouseover', up);
+      mouse('mouseenter', { ...up, ...enter });
+      mouse('mousemove', up);
+      mouse('mousedown');
+      mouse('mouseup', up);
+      mouse('click', up);
+      return;
+    }
+
+    // A mouse: every pointer event is followed by its mouse counterpart.
+    point('pointerover', up);
+    mouse('mouseover', up);
+    point('pointerenter', { ...up, ...enter });
+    mouse('mouseenter', { ...up, ...enter });
+    point('pointermove', up);
+    mouse('mousemove', up);
+    point('pointerdown');
+    mouse('mousedown');
+    point('pointerup', lifted);
+    mouse('mouseup', up);
+    mouse('click', up);
   }
 
-  /** The stake a dry-run trade is scored with: what the platform's amount
-      field shows, else what the stake sizer would write, else $1. */
-  function dryStake() {
+  /* ---- Humanized input --------------------------------------------------
+     A trade is placed the way a person places one. In the Android app the
+     finger is real (nativeTap / nativeType: trusted events, queued on the
+     app's own timeline). In the extension nothing the bot dispatches can be
+     trusted, but it can at least happen the way a hand makes it happen:
+     the mouse travels to the button along a curve and settles on it, rests
+     a moment, the press is held for the time a finger takes, then the
+     click; a finger lands and lifts; the stake is clicked into, selected
+     and typed key by key with the gaps of a thumb. The point pressed is
+     never the exact centre and never the same twice. Everything goes out on
+     one serial timeline, like one hand: typing first, then the button. */
+
+  const rand = (min, max) => min + Math.random() * (max - min);
+
+  /** A standard normal deviate, clamped to ±2.5σ (Box–Muller). */
+  function gaussian() {
+    let u = 0;
+    let v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    const z = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    return Math.max(-2.5, Math.min(2.5, z));
+  }
+
+  /**
+   * Where on the element the press lands. A person aims at the middle and
+   * misses a little: by the same habit each time (the install's aim bias,
+   * PROFILE_RANGES aimX/aimY) plus the scatter of the moment — never the
+   * exact centre, never the edge.
+   */
+  function landingPoint(element) {
+    const rect = (typeof element.getBoundingClientRect === 'function')
+      ? element.getBoundingClientRect()
+      : { left: 0, top: 0, width: 0, height: 0 };
+    const width = rect.width || 0;
+    const height = rect.height || 0;
+    const fx = Math.max(0.12, Math.min(0.88, 0.5 + profile.aimX + gaussian() * 0.11));
+    const fy = Math.max(0.12, Math.min(0.88, 0.5 + profile.aimY + gaussian() * 0.11));
+    return { x: (rect.left || 0) + width * fx, y: (rect.top || 0) + height * fy, rect };
+  }
+
+  /**
+   * The real pointer, from trusted events only (the bot's own are never
+   * trusted): where the cursor actually is and what it is over, so a
+   * synthetic mouse path starts from there; and whether the last thing
+   * seen was a finger or a mouse, so the gesture is of that kind.
+   */
+  const realPointer = { x: null, y: null, type: null, over: null, at: 0 };
+  (function trackRealPointer() {
+    if (typeof document.addEventListener !== 'function') return;
+    const options = { capture: true, passive: true };
+    const seen = (event) => {
+      if (!event.isTrusted) return;
+      realPointer.x = event.clientX;
+      realPointer.y = event.clientY;
+      realPointer.type = event.pointerType || 'mouse';
+      realPointer.over = event.target;
+      realPointer.at = Date.now();
+    };
+    document.addEventListener('pointermove', seen, options);
+    document.addEventListener('pointerdown', seen, options);
+    document.addEventListener('pointerout', (event) => {
+      // The mouse left the window: nothing is under it any more.
+      if (event.isTrusted && event.relatedTarget === null && (event.pointerType || 'mouse') === 'mouse') {
+        realPointer.over = null;
+        realPointer.at = Date.now();
+      }
+    }, options);
+  })();
+
+  /** A finger or a mouse: whatever was last seen for real, else the device's word. */
+  function pointerKind() {
+    if (realPointer.type === 'touch' || realPointer.type === 'pen') return 'touch';
+    if (realPointer.type === 'mouse') return 'mouse';
+    return (('ontouchstart' in window) || (navigator.maxTouchPoints > 0)) ? 'touch' : 'mouse';
+  }
+
+  /**
+   * One serial timeline for everything the bot does to the page with a
+   * pointer or keys, like a person with one hand: a gesture queued while
+   * another is going out starts when it is done. A step is a synchronous
+   * function run `delay` ms after the one before; it may return more steps
+   * to run next (a path is worked out only as it starts, from wherever the
+   * pointer is by then). Timings are rolled when a gesture is queued, so
+   * the moment its last event lands is known then: confirmTrade waits
+   * from there.
+   */
+  const gesture = {
+    steps: [],
+    running: false,
+    readyAt: 0,
+    /** Queues `steps`, which take `ms` in all; returns the ms until they are done. */
+    add(steps, ms) {
+      const now = Date.now();
+      this.readyAt = Math.max(now, this.readyAt) + Math.max(0, Math.round(ms));
+      this.steps.push(...steps);
+      if (!this.running) this.next();
+      return this.readyAt - now;
+    },
+    next() {
+      const step = this.steps.shift();
+      if (!step) {
+        this.running = false;
+        return;
+      }
+      this.running = true;
+      // A hidden tab's timers fire once a second: the rest of the gesture
+      // would take a minute and the click would miss its confirmation
+      // window. What is left goes out at once instead — the events still
+      // matter, the pace no longer does (nobody clicks in a hidden tab).
+      if (document.visibilityState === 'hidden') {
+        this.finish(step);
+        return;
+      }
+      setTimeout(() => {
+        const more = this.perform(step);
+        if (more) this.steps.unshift(...more);
+        this.next();
+      }, Math.max(0, Math.round(step.delay) || 0));
+    },
+    perform(step) {
+      let more = null;
+      try { more = step.run(); } catch (error) { console.debug('[AutoTrade] gesture step failed:', error); }
+      return Array.isArray(more) && more.length > 0 ? more : null;
+    },
+    /** Runs `step` and everything queued behind it now. */
+    finish(step) {
+      for (let current = step; current; current = this.steps.shift()) {
+        const more = this.perform(current);
+        if (more) this.steps.unshift(...more);
+      }
+      this.running = false;
+      this.readyAt = 0;
+    },
+    get pending() { return this.readyAt > Date.now(); },
+  };
+
+  /** Where the page last saw the bot's pointer, and over what. */
+  const pointerState = { x: null, y: null, over: null, at: 0 };
+
+  /** The element the page's own hit test finds at a point (never null). */
+  function elementAt(x, y) {
+    let hit = null;
+    try { hit = document.elementFromPoint(x, y); } catch (_) { hit = null; }
+    return hit || document.documentElement || document.body;
+  }
+
+  /** The element and its ancestors, innermost first (enter/leave walk these). */
+  function lineage(node) {
+    const list = [];
+    for (let n = node; n && n.nodeType === 1; n = n.parentElement) list.push(n);
+    return list;
+  }
+
+  /** The offset from client to screen coordinates a real event carries. */
+  function screenOffset() {
+    const dx = Math.max(0, ((window.outerWidth || 0) - (window.innerWidth || 0)) / 2);
+    const dy = Math.max(0, (window.outerHeight || 0) - (window.innerHeight || 0) - dx);
+    return { x: (window.screenX || 0) + dx, y: (window.screenY || 0) + dy };
+  }
+
+  /** The init dictionary of a mouse-class event at a client point. */
+  function eventInit(x, y, extra) {
+    const screen = screenOffset();
+    return {
+      bubbles: true, cancelable: true, composed: true, view: window, detail: 0,
+      button: 0, buttons: 0,
+      clientX: x, clientY: y,
+      screenX: x + screen.x, screenY: y + screen.y,
+      pageX: x + (window.scrollX || 0), pageY: y + (window.scrollY || 0),
+      movementX: 0, movementY: 0,
+      ...(extra || null),
+    };
+  }
+  const NO_BUBBLE = { bubbles: false, cancelable: false };   // enter/leave never bubble
+
+  const pointerFields = (kind, pressed) => ({
+    pointerId: 1, pointerType: kind, isPrimary: true,
+    width: kind === 'touch' ? 24 : 1, height: kind === 'touch' ? 24 : 1,
+    pressure: pressed ? 0.5 : 0, tangentialPressure: 0, tiltX: 0, tiltY: 0, twist: 0,
+  });
+  function firePointer(target, type, init, kind, pressed) {
+    if (typeof PointerEvent === 'undefined') return;
+    try { target.dispatchEvent(new PointerEvent(type, { ...init, ...pointerFields(kind, pressed) })); } catch (_) { /* unsupported */ }
+  }
+  function fireMouse(target, type, init) {
+    try { target.dispatchEvent(new MouseEvent(type, init)); } catch (_) { /* unsupported */ }
+  }
+  /** Best effort: not every engine has the Touch/TouchEvent constructors. */
+  function fireTouch(target, type, x, y, ended) {
+    if (typeof window.Touch !== 'function' || typeof window.TouchEvent !== 'function') return;
+    try {
+      const init = eventInit(x, y);
+      const finger = new window.Touch({
+        identifier: 1, target,
+        clientX: x, clientY: y, pageX: init.pageX, pageY: init.pageY,
+        screenX: init.screenX, screenY: init.screenY, radiusX: 12, radiusY: 12, force: 0.5,
+      });
+      const active = ended ? [] : [finger];
+      target.dispatchEvent(new window.TouchEvent(type, {
+        bubbles: true, cancelable: true, composed: true, view: window,
+        touches: active, targetTouches: active, changedTouches: [finger],
+      }));
+    } catch (_) { /* constructor unsupported */ }
+  }
+
+  /**
+   * The mouse crosses from what it was over to what it is over now: out
+   * and leave on what it left, over and enter on what it reached, leave
+   * and enter walking the ancestors the two do not share — the pointer
+   * events first, then their mouse twins, as the browser orders them (the
+   * mouse twins alone for the virtual mouse a finger leaves behind).
+   */
+  function crossTo(next, x, y, pressed, families = ['pointer', 'mouse']) {
+    const prev = pointerState.over;
+    if (prev === next) return;
+    const leaving = prev ? lineage(prev).filter((node) => !next || !node.contains(next)) : [];
+    const entering = next ? lineage(next).filter((node) => !prev || !node.contains(prev)).reverse() : [];
+    const init = eventInit(x, y, pressed ? { buttons: 1 } : null);
+    const bubbling = (related) => ({ ...init, relatedTarget: related });
+    const quiet = (related) => ({ ...init, ...NO_BUBBLE, relatedTarget: related });
+    for (const family of families) {
+      const fire = family === 'pointer'
+        ? (target, type, dict) => firePointer(target, type, dict, 'mouse', pressed)
+        : fireMouse;
+      if (prev) {
+        fire(prev, family + 'out', bubbling(next));
+        for (const node of leaving) fire(node, family + 'leave', quiet(next));
+      }
+      if (next) {
+        fire(next, family + 'over', bubbling(prev));
+        for (const node of entering) fire(node, family + 'enter', quiet(prev));
+      }
+    }
+    pointerState.over = next;
+  }
+
+  /** The mouse at (x, y): whatever it crossed on the way, then the move. */
+  function mouseTo(x, y, pressed) {
+    const target = elementAt(x, y);
+    crossTo(target, x, y, pressed);
+    const init = eventInit(x, y, {
+      movementX: pointerState.x === null ? 0 : Math.round(x - pointerState.x),
+      movementY: pointerState.y === null ? 0 : Math.round(y - pointerState.y),
+      ...(pressed ? { buttons: 1 } : null),
+    });
+    firePointer(target, 'pointermove', init, 'mouse', pressed);
+    fireMouse(target, 'mousemove', init);
+    pointerState.x = x;
+    pointerState.y = y;
+    pointerState.at = Date.now();
+  }
+
+  /**
+   * Where a mouse path starts: the real cursor when it has moved since the
+   * page last saw the bot's pointer, else where that was, else somewhere
+   * over the page (a cursor left alone while the chart is watched).
+   */
+  function mouseOrigin() {
+    if (realPointer.type === 'mouse' && realPointer.x !== null && realPointer.at >= pointerState.at) {
+      pointerState.x = realPointer.x;
+      pointerState.y = realPointer.y;
+      pointerState.over = realPointer.over;
+      pointerState.at = realPointer.at;
+    }
+    if (pointerState.x !== null) return { x: pointerState.x, y: pointerState.y };
+    return {
+      x: (window.innerWidth || 800) * rand(0.2, 0.8),
+      y: (window.innerHeight || 600) * rand(0.2, 0.8),
+    };
+  }
+
+  /** Fitts's law: further and smaller targets take longer, with the install's pace. */
+  function mouseTravelMs(from, to, targetSize) {
+    const distance = Math.hypot(to.x - from.x, to.y - from.y);
+    const width = Math.max(8, targetSize || 20);
+    return Math.round((100 + 120 * Math.log2(1 + distance / width)) * rand(0.85, 1.25) * profile.move);
+  }
+
+  /**
+   * The steps of a mouse path to `to` taking `ms`: a gentle curve, quick
+   * in the middle and settling at the end (a minimum-jerk profile), with
+   * the small wander of a hand, sampled at the frame rate mouse moves
+   * arrive at. Worked out as it starts, from wherever the pointer is then.
+   */
+  function mousePathSteps(to, ms, pressed) {
+    const from = mouseOrigin();
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance < 1) return [{ delay: 0, run: () => mouseTo(to.x, to.y, pressed) }];
+    const count = Math.max(2, Math.round(ms / 16));
+    const bend = rand(-0.2, 0.2) * distance;            // sideways, either way
+    const cx = from.x + dx / 2 - (dy / distance) * bend;
+    const cy = from.y + dy / 2 + (dx / distance) * bend;
+    const steps = [];
+    for (let i = 1; i <= count; i += 1) {
+      const t = i / count;
+      const s = t * t * t * (10 + t * (-15 + 6 * t));   // 10t³ − 15t⁴ + 6t⁵
+      const u = 1 - s;
+      const last = i === count;
+      const x = last ? to.x : u * u * from.x + 2 * u * s * cx + s * s * to.x + rand(-0.6, 0.6);
+      const y = last ? to.y : u * u * from.y + 2 * u * s * cy + s * s * to.y + rand(-0.6, 0.6);
+      steps.push({ delay: ms / count, run: () => mouseTo(x, y, pressed) });
+    }
+    return steps;
+  }
+
+  /**
+   * A real mousedown moves the focus; a synthetic one does not, so it is
+   * moved here: to the control pressed, else away from whatever had it.
+   */
+  function focusAfterPress(target) {
+    try {
+      const control = typeof target.closest === 'function'
+        ? target.closest('button, input, select, textarea, a[href], [tabindex]') : null;
+      if (control && typeof control.focus === 'function') control.focus({ preventScroll: true });
+      else if (document.activeElement && document.activeElement !== document.body &&
+               typeof document.activeElement.blur === 'function') document.activeElement.blur();
+    } catch (_) { /* best effort */ }
+  }
+
+  /** What the press should hit: the page's own hit test, unless something covers the element. */
+  function pressTarget(element, point) {
+    const hit = elementAt(point.x, point.y);
+    if (element.contains(hit)) return hit;
+    log('Click: something else is drawn over the button — clicking it through that.');
+    return element;
+  }
+
+  /**
+   * A mouse click on `element` as a hand makes it: the path (worked out as
+   * it starts), a rest on the spot, the button down, held, up, the click.
+   */
+  function mouseClickSteps(element, point, travelMs, dwellMs, holdMs) {
+    let target = element;
+    return [
+      { delay: 0, run: () => mousePathSteps(point, travelMs, false) },
+      { delay: dwellMs, run: () => {
+        target = pressTarget(element, point);
+        const down = eventInit(point.x, point.y, { buttons: 1 });
+        firePointer(target, 'pointerdown', down, 'mouse', true);
+        fireMouse(target, 'mousedown', down);
+        focusAfterPress(target);
+      } },
+      { delay: holdMs, run: () => {
+        const up = eventInit(point.x, point.y);
+        firePointer(target, 'pointerup', up, 'mouse', false);
+        fireMouse(target, 'mouseup', up);
+        fireMouse(target, 'click', eventInit(point.x, point.y, { detail: 1 }));
+      } },
+    ];
+  }
+
+  /**
+   * A finger tap on `element`: it lands (pointer events, the touch event
+   * they mirror), rests for the time a fingertip does, lifts — and only
+   * then the mouse-compatibility events and the click, as browsers order
+   * a tap. The sequence of simulateClick, spread over the hold.
+   */
+  function touchTapSteps(element, point, holdMs) {
+    let target = element;
+    const { x, y } = point;
+    return [
+      { delay: 0, run: () => {
+        target = pressTarget(element, point);
+        const down = eventInit(x, y, { buttons: 1 });
+        firePointer(target, 'pointerover', down, 'touch', true);
+        for (const node of lineage(target).reverse()) firePointer(node, 'pointerenter', { ...down, ...NO_BUBBLE }, 'touch', true);
+        firePointer(target, 'pointerdown', down, 'touch', true);
+        fireTouch(target, 'touchstart', x, y, false);
+      } },
+      { delay: holdMs, run: () => {
+        const up = eventInit(x, y);
+        firePointer(target, 'pointerup', up, 'touch', false);
+        firePointer(target, 'pointerout', up, 'touch', false);
+        for (const node of lineage(target)) firePointer(node, 'pointerleave', { ...up, ...NO_BUBBLE }, 'touch', false);
+        fireTouch(target, 'touchend', x, y, true);
+        // The mouse-compatibility events a tap ends with, then the click.
+        // They leave a virtual mouse resting where the finger was.
+        pointerState.over = null;
+        crossTo(target, x, y, false, ['mouse']);
+        fireMouse(target, 'mousemove', up);
+        fireMouse(target, 'mousedown', eventInit(x, y, { buttons: 1 }));
+        focusAfterPress(target);
+        fireMouse(target, 'mouseup', up);
+        fireMouse(target, 'click', eventInit(x, y, { detail: 1 }));
+        pointerState.x = x;
+        pointerState.y = y;
+        pointerState.at = Date.now();
+      } },
+    ];
+  }
+
+  /** The steps of a click or tap on `element` at `point`, and how long they take. */
+  function pressSteps(element, point) {
+    if (pointerKind() === 'touch') {
+      const hold = rand(60, 130);
+      return { steps: touchTapSteps(element, point, hold), ms: hold + 10 };
+    }
+    const travel = mouseTravelMs(mouseOrigin(), point, Math.min(point.rect.width, point.rect.height));
+    const dwell = rand(60, 220);
+    const hold = rand(55, 140);
+    return { steps: mouseClickSteps(element, point, travel, dwell, hold), ms: travel + dwell + hold };
+  }
+
+  const KEY_CODES = { '.': ['Period', 190], ',': ['Comma', 188] };
+  function keyInit(ch, pressType) {
+    const digit = /^[0-9]$/.test(ch);
+    const keyCode = digit ? 48 + Number(ch) : KEY_CODES[ch][1];
+    const charCode = pressType === 'keypress' ? ch.charCodeAt(0) : 0;
+    return {
+      key: ch, code: digit ? 'Digit' + ch : KEY_CODES[ch][0],
+      keyCode: pressType === 'keypress' ? charCode : keyCode, which: pressType === 'keypress' ? charCode : keyCode,
+      charCode, bubbles: true, cancelable: true, composed: true, view: window,
+    };
+  }
+  function fireKey(target, type, ch) {
+    try { target.dispatchEvent(new KeyboardEvent(type, keyInit(ch, type))); } catch (_) { /* unsupported */ }
+  }
+  function fireInput(target, type, ch) {
+    let event = null;
+    try {
+      event = new InputEvent(type, { inputType: 'insertText', data: ch, bubbles: true, cancelable: type === 'beforeinput', composed: true });
+    } catch (_) {
+      event = new Event(type, { bubbles: true, cancelable: type === 'beforeinput' });
+    }
+    try { target.dispatchEvent(event); } catch (_) { /* unsupported */ }
+  }
+
+  /**
+   * Types `text` into `input` as a person does: the field is clicked (mouse
+   * or finger, like the button), what it holds is selected, then one key at
+   * a time — keydown, keypress, beforeinput, the character, input, keyup —
+   * with the gaps of a thumb on a keypad; then the field is left (change,
+   * blur), as it is when the hand moves on to the button. Queued on the
+   * gesture timeline; returns the ms until it is done, or null when the
+   * text is not something the keys can type.
+   */
+  function humanType(input, text) {
+    if (!/^[0-9.,]{1,12}$/.test(text) || typeof input.dispatchEvent !== 'function') return null;
+    if (document.visibilityState === 'hidden') return null;   // see gesture.next
+    let setter = null;
+    try { setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; } catch (_) { setter = null; }
+    if (typeof setter !== 'function') return null;
+    const point = landingPoint(input);
+    const press = pressSteps(input, point);
+    const steps = press.steps.slice();
+    let ms = press.ms;
+    // A person selects what is there (a double-click, a drag: the result is
+    // the same selection), so the first key replaces it.
+    const settle = rand(120, 260);
+    steps.push({ delay: settle, run: () => {
+      input.focus({ preventScroll: true });
+      input.select();
+    } });
+    ms += settle;
+    let value = '';
+    for (const ch of text) {
+      const gap = rand(70, 160);
+      const hold = rand(40, 90);
+      steps.push({ delay: gap, run: () => {
+        fireKey(input, 'keydown', ch);
+        fireKey(input, 'keypress', ch);
+        fireInput(input, 'beforeinput', ch);
+        value += ch;
+        setter.call(input, value);
+        fireInput(input, 'input', ch);
+      } });
+      steps.push({ delay: hold, run: () => fireKey(input, 'keyup', ch) });
+      ms += gap + hold;
+    }
+    const leave = rand(80, 200);
+    steps.push({ delay: leave, run: () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      if (document.activeElement === input) input.blur();
+    } });
+    ms += leave;
+    return gesture.add(steps, ms);
+  }
+
+  /**
+   * The click that places the trade, as a hand makes it: the app's real
+   * finger when there is one, else the gesture of the kind of pointer last
+   * seen. Queued behind the stake typing. Returns the ms until the click
+   * lands, or null when no gesture could be queued (the caller falls back
+   * to the instant simulateClick).
+   */
+  function humanClick(element) {
+    if (!element || typeof element.getBoundingClientRect !== 'function') return null;
+    const point = landingPoint(element);
+    if (typeof globalThis.__nexaNativeTap === 'function' && gesture.pending) {
+      // The stake is still being typed by synthetic keys (the app declined
+      // to type it): the real finger waits its turn behind them.
+      const after = gesture.readyAt - Date.now();
+      gesture.add([{ delay: 0, run: () => {
+        if (nativeTap(element, point.x, point.y) === null) simulateClick(element);
+      } }], 200);
+      return after + 200;
+    }
+    const native = nativeTap(element, point.x, point.y);
+    if (native !== null) return native;
+    if (typeof element.dispatchEvent !== 'function') return null;
+    if (document.visibilityState === 'hidden') return null;   // see gesture.next
+    const press = pressSteps(element, point);
+    return gesture.add(press.steps, press.ms);
+  }
+
+  /** The click of a trade. Returns the ms until it lands (0: it already has). */
+  function placeClick(element) {
+    if (CONFIG.HUMAN_CLICK) {
+      const ms = humanClick(element);
+      if (ms !== null) return ms;
+    }
+    simulateClick(element);
+    return 0;
+  }
+
+  /** The stake a dry-run trade is scored with: what the stake sizer would
+      write for this entry, else what the platform's amount field shows,
+      else $1 — so a dry run's P&L means the same thing a real run's would. */
+  function dryStake(view) {
+    const planned = plannedStake(view);
+    if (planned !== null) return planned;
     const input = findStakeInput();
     if (input) {
       const value = parseFloat(String(input.value).replace(/[^\d.]/g, ''));
       if (Number.isFinite(value) && value > 0) return value;
     }
-    if (CONFIG.STAKE_MODE === 'fixed') return Math.max(1, CONFIG.STAKE_VALUE);
     return 1;
   }
 
@@ -1972,9 +2835,10 @@
    * @param {'UP'|'DOWN'} direction
    * @param {string} [variantId] the auto-mode variant that fired, for the journal
    * @param {string} [reason] the signal's reason, for the log and the journal
+   * @param {Object} [view] the signal view, for evidence-based stake sizing
    * @returns {boolean} true if a click was actually dispatched.
    */
-  function executeTrade(direction, variantId, reason) {
+  function executeTrade(direction, variantId, reason, view) {
     const found = findTradeButton(direction);
 
     if (!found) {
@@ -2021,6 +2885,7 @@
       bot.lastTradeAt = Date.now();
       showAlert(direction);
       log('SIGNAL (alert-only):', direction, 'at', feed.price + why, '— no click by design.');
+      notice('SIGNAL only — you place the trade (Signal-only is ON)', 6000);
       return false;
     }
 
@@ -2041,7 +2906,7 @@
       // thing in both modes. Daily P&L is real money and stays untouched.
       trade.dry = true;
       trade.account = 'dry';
-      trade.amount = dryStake();
+      trade.amount = dryStake(view);
       bot.trades.push(trade);
       trimTrades();
       dryPendings.push({
@@ -2057,9 +2922,11 @@
       });
       bot.lastTradeAt = now;
       bot.tradeCount += 1;
+      bot.nextCooldownJitter = rollCooldownJitter();
       showAlert(direction);
       log('DRY RUN #' + bot.tradeCount + ' — would click', direction, 'at', feed.price + why,
           'via', via, '| $' + trade.amount + ' virtual, settles in ' + trade.expirySec + 's');
+      notice('DRY RUN — no real click (Dry-run is ON in settings)', 6000);
       return false;
     }
 
@@ -2080,17 +2947,24 @@
       return false;
     }
 
-    setStake();
-    simulateClick(button);
+    setStake(plannedStake(view));
+    // The stake typing and the click go out as one hand's gestures (or the
+    // app's real finger): the click lands a little later, and the
+    // confirmation window is counted from then.
+    const landsIn = placeClick(button);
     showAlert(direction);
     bot.lastTradeAt = now;
     bot.tradeCount += 1;
+    bot.hourlyTrades.push(now);
+    bot.nextCooldownJitter = rollCooldownJitter();
     trade.account = account;
     bot.trades.push(trade);
     trimTrades();
-    log('Clicked', direction, '#' + bot.tradeCount, 'at', feed.price + why, '— awaiting confirmation');
+    log('Clicked', direction, '#' + bot.tradeCount, 'at', feed.price + why, '— awaiting confirmation' +
+        (landsIn > 0 ? ' (the click lands in ' + (landsIn / 1000).toFixed(1) + ' s)' : ''));
+    notice(direction + ' clicked #' + bot.tradeCount + ' — confirming…', CONFIG.CONFIRM_MS + landsIn + 2000);
 
-    confirmTrade(trade);
+    confirmTrade(trade, landsIn);
     return true;
   }
 
@@ -2139,8 +3013,10 @@
    * A synthetic click carries isTrusted: false. If Quotex rejects those, the
    * button click is a silent no-op — so verify against the server rather than
    * assuming success. Only a matching server-side open order is confirmation.
+   * `landsIn`: the ms until the click actually lands (a gesture or the
+   * app's finger is still on its way); the window is counted from then.
    */
-  function confirmTrade(trade) {
+  function confirmTrade(trade, landsIn = 0) {
     setTimeout(() => {
       // The bot was stopped (or restarted) while this timer was pending — a
       // verdict either way would poison another run's counters and status
@@ -2155,12 +3031,14 @@
         log('CONFIRMED:', trade.direction, 'accepted —',
             '$' + trade.amount + ' @ ' + trade.openPrice,
             '| balance $' + (feed.balance ? feed.balance.demo : '?'));
+        notice('✓ ' + trade.direction + ' placed — trade confirmed', 6000);
         return;
       }
 
       trade.verdict = 'unconfirmed';
       bot.unconfirmed += 1;
       log('UNCONFIRMED:', trade.direction, '— no matching server order arrived.');
+      notice('✗ ' + trade.direction + ' click did not register on the page', 6000);
 
       if (bot.unconfirmed >= 2) {
         if (CONFIG.RUN_UNTIL_STOPPED) {
@@ -2181,7 +3059,7 @@
           stopBot('Clicks not registering');
         }
       }
-    }, CONFIG.CONFIRM_MS);
+    }, CONFIG.CONFIRM_MS + Math.max(0, Math.round(landsIn) || 0));
   }
 
   /**
@@ -2371,8 +3249,11 @@
       if (profit > 0) bot.wins += 1;
       else if (profit < 0) bot.losses += 1;   // profit === 0 is a draw
       bot.pnl = +(bot.pnl + profit).toFixed(2);
-      if (profit < 0) bot.lossStreak += 1;
-      else if (profit > 0) bot.lossStreak = 0;
+      if (profit < 0) {
+        if (Date.now() >= bot.pausedUntil) bot.lossStreak += 1;
+      } else if (profit > 0) {
+        bot.lossStreak = 0;
+      }
     }
 
     log(label, trade.direction, result.openPrice, '->', result.closePrice,
@@ -2382,9 +3263,10 @@
     // virtual and would count the same market moment twice.
     if (!trade.dry) noteRealOutcome(trade.variantId, profit);
 
-    // Circuit breakers. The daily cap tracks real money only — a dry run
-    // must never lock the account out of a day it has not traded.
-    const today = trade.dry ? dailyPnl() : addDailyPnl(profit);
+    // Circuit breakers. The daily limits track real money only — a dry run
+    // must never lock the account out of a day it has not traded — and per
+    // account, so a demo loss cannot stop a live day (or hide a live loss).
+    const breach = trade.dry ? null : (addDailyPnl(profit, trade.account), dailyBreach(trade.account));
     if (bot.running && thisRun && CONFIG.MAX_LOSS_STREAK > 0 &&
         bot.lossStreak >= CONFIG.MAX_LOSS_STREAK) {
       log(bot.lossStreak + ' consecutive losses — the strategy is not working ' +
@@ -2396,10 +3278,16 @@
       } else {
         stopBot(bot.lossStreak + ' losses in a row');
       }
-    } else if (bot.running && !trade.dry && CONFIG.DAILY_LOSS_CAP > 0 &&
-               today <= -CONFIG.DAILY_LOSS_CAP) {
-      log('Daily loss cap reached ($' + today + '). Stopping for the day.');
-      stopBot('Daily loss cap hit');
+    } else if (bot.running && breach !== null && trade.account === bot.account) {
+      const today = dailyPnl(trade.account);
+      if (breach === 'daily cap') {
+        log('Daily loss cap reached ($' + today + ' on ' + trade.account + '). Stopping for the day.');
+        stopBot('Daily loss cap hit');
+      } else {
+        log('Daily profit target reached ($' + today + ' on ' + trade.account +
+            '). Stopping for the day — a banked day is the one edge that needs no model.');
+        stopBot('Daily profit target hit');
+      }
     }
   }
 
@@ -2501,19 +3389,158 @@
       '-' + String(d.getDate()).padStart(2, '0');
   }
 
-  /** Realized bot P&L for today, persisted (extension storage) so neither a
-      reload nor a "clear site data" can reset the cap. Reads are from the
-      store's in-memory cache — this runs from tradeVeto on every tick. */
-  function dailyPnl() {
+  /**
+   * Today's record, persisted (extension storage) so neither a reload nor a
+   * "clear site data" can reset the limits: realized bot P&L in total and
+   * per account, plus the balance each account had when the bot first
+   * traded on it today — the base the percentage limits are measured from.
+   * Reads are from the store's in-memory cache (tradeVeto calls this every
+   * tick); a record from another day reads as empty.
+   */
+  function dailyRecord() {
     const raw = store.get(DAILY_KEY);
-    if (raw && raw.d === todayKey() && Number.isFinite(raw.pnl)) return raw.pnl;
-    return 0;
+    if (raw && raw.d === todayKey()) {
+      return {
+        d: raw.d,
+        pnl: Number.isFinite(raw.pnl) ? raw.pnl : 0,
+        acct: raw.acct && typeof raw.acct === 'object' ? { ...raw.acct } : {},
+        start: raw.start && typeof raw.start === 'object' ? { ...raw.start } : {},
+      };
+    }
+    return { d: todayKey(), pnl: 0, acct: {}, start: {} };
   }
 
-  function addDailyPnl(delta) {
-    const next = { d: todayKey(), pnl: +(dailyPnl() + delta).toFixed(2) };
-    store.set(DAILY_KEY, next);
-    return next.pnl;
+  /** Realized bot P&L for today — one account's, or every account's. */
+  function dailyPnl(account) {
+    const record = dailyRecord();
+    if (account === undefined) return record.pnl;
+    return Number.isFinite(record.acct[account]) ? record.acct[account] : 0;
+  }
+
+  function addDailyPnl(delta, account) {
+    const record = dailyRecord();
+    record.pnl = +(record.pnl + delta).toFixed(2);
+    record.acct[account] = +(dailyPnl(account) + delta).toFixed(2);
+    store.set(DAILY_KEY, record);
+    return record.acct[account];
+  }
+
+  /** The feed's balance for an account, or null while unknown. A zero or
+      negative figure is "unknown" too: the platform reports 0 for an
+      account that was never funded, and a 10% cap on nothing is a lockout. */
+  function accountBalance(account) {
+    if (!feed.balance || (account !== 'demo' && account !== 'live')) return null;
+    const value = feed.balance[account];
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+
+  /** The balance an account had when the bot first traded on it today —
+      recorded on first use, so a day's limits do not drift with the P&L
+      they measure. Null while the feed has not reported the balance. */
+  function dailyStartBalance(account) {
+    const record = dailyRecord();
+    if (Number.isFinite(record.start[account]) && record.start[account] > 0) {
+      return record.start[account];
+    }
+    const balance = accountBalance(account);
+    if (balance === null) return null;
+    record.start[account] = balance;
+    store.set(DAILY_KEY, record);
+    return balance;
+  }
+
+  /**
+   * Today's limits for an account in dollars: the loss cap (percentage or
+   * absolute — whichever is set and nearer) and the profit target, each
+   * null when not in force. Read-only: an account whose starting balance
+   * was never recorded only has the absolute cap.
+   */
+  function dailyLimits(account) {
+    const record = dailyRecord();
+    const today = Number.isFinite(record.acct[account]) ? record.acct[account] : 0;
+    const start = Number.isFinite(record.start[account]) && record.start[account] > 0
+      ? record.start[account] : null;
+    let cap = CONFIG.DAILY_LOSS_CAP > 0 ? CONFIG.DAILY_LOSS_CAP : null;
+    if (start !== null && CONFIG.DAILY_LOSS_CAP_PCT > 0) {
+      const pctCap = start * CONFIG.DAILY_LOSS_CAP_PCT / 100;
+      cap = cap === null ? pctCap : Math.min(cap, pctCap);
+    }
+    const target = start !== null && CONFIG.DAILY_PROFIT_TARGET_PCT > 0
+      ? start * CONFIG.DAILY_PROFIT_TARGET_PCT / 100 : null;
+    return { today, start, cap, target };
+  }
+
+  /** Which daily limit today's P&L on this account has crossed, if any:
+      'daily cap' or 'daily target'. */
+  function dailyBreach(account) {
+    const { today, cap, target } = dailyLimits(account);
+    if (cap !== null && today <= -cap) return 'daily cap';
+    if (target !== null && today >= target) return 'daily target';
+    return null;
+  }
+
+  /**
+   * The hit-rate evidence behind a signal, for Kelly sizing: the qualified
+   * variant's Wilson lower bound in auto mode, or this session's real record
+   * once it has 30 decided trades. Null for the entries that carry none —
+   * the instant entry after Start, the keep-trading fallback, an unproven
+   * fixed model — which then ride the minimum stake.
+   */
+  function stakeEvidence(view) {
+    if (!view || !view.signal) return null;
+    if (Number.isFinite(view.lowerBound)) return view.lowerBound;
+    if (view.reason === 'instant entry' || view.reason === 'keep trading') return null;
+    const decided = bot.wins + bot.losses;
+    if (decided < 30) return null;
+    return AP.wilsonLowerBound(bot.wins, decided, CONFIG.AUTO_CONFIDENCE_Z);
+  }
+
+  /**
+   * The stake CONFIG.STAKE_MODE wants for this entry, in dollars, or null to
+   * leave the platform's amount alone (mode off, or the figure it needs —
+   * the balance, the payout — is not known yet).
+   */
+  function plannedStake(view) {
+    const mode = CONFIG.STAKE_MODE;
+    const floor = Math.max(0.01, CONFIG.STAKE_MIN);
+    if (mode === 'fixed') return Math.max(floor, Math.round(CONFIG.STAKE_VALUE * 100) / 100);
+    if (mode !== 'percent' && mode !== 'kelly') return null;
+    const account = bot.running ? bot.account : accountType();
+    const balance = accountBalance(account);
+    if (balance === null) return null;
+    if (mode === 'percent') {
+      return humanized(Math.max(floor, Math.round(balance * CONFIG.STAKE_VALUE) / 100), floor);
+    }
+    return humanized(AP.kellyStake({
+      balance,
+      payoutPct: panel.payoutPct === null ? ASSUMED_PAYOUT_PCT : panel.payoutPct,
+      hitRate: stakeEvidence(view),
+      fraction: CONFIG.KELLY_FRACTION,
+      maxPct: CONFIG.STAKE_MAX_PCT,
+      minStake: floor,
+    }), floor);
+  }
+
+  /** STAKE_HUMAN: the sizer's figure as a person would type it (null passes through). */
+  const humanized = (amount, floor) =>
+    (amount === null || !CONFIG.STAKE_HUMAN) ? amount : AP.humanStake(amount, floor);
+
+  /** The most any single stake may be: STAKE_MAX_PCT of the balance under
+      kelly sizing; the other modes carry their own figure. */
+  function stakeCeiling() {
+    if (CONFIG.STAKE_MODE !== 'kelly') return Infinity;
+    const balance = accountBalance(bot.running ? bot.account : accountType());
+    return balance === null ? Infinity : balance * CONFIG.STAKE_MAX_PCT / 100;
+  }
+
+  /** "$ 1,250.50" -> 1250.5; a comma with one or two digits after it is a
+      decimal comma. Null when the text is not an amount. */
+  function parseAmount(text) {
+    let s = String(text || '').replace(/[$\s]/g, '');
+    if (!s) return null;
+    s = /^\d+,\d{1,2}$/.test(s) ? s.replace(',', '.') : s.replace(/,/g, '');
+    const value = Number(s);
+    return Number.isFinite(value) && value >= 0 ? value : null;
   }
 
   /** The platform's amount input: numeric-looking value (not a duration),
@@ -2547,27 +3574,47 @@
     return best;
   }
 
-  /** Write the configured stake into the platform's amount field. Uses the
+  /** Write the planned stake into the platform's amount field. Uses the
       native value setter + an input event so React-style UIs register it.
       Best-effort by design: a failure logs and the trade proceeds with
       whatever amount is already set. */
-  function setStake() {
+  function setStake(amount) {
     if (CONFIG.STAKE_MODE === 'off') return;
-    let amount = CONFIG.STAKE_VALUE;
-    if (CONFIG.STAKE_MODE === 'percent') {
-      const balance = feed.balance && Number.isFinite(feed.balance.demo)
-        ? feed.balance.demo : null;
-      if (balance === null) {
-        log('Stake: demo balance unknown — leaving the amount as-is.');
-        return;
-      }
-      amount = balance * CONFIG.STAKE_VALUE / 100;
+    if (amount === null) {
+      log('Stake (' + CONFIG.STAKE_MODE + '): balance unknown — leaving the amount as-is.');
+      return;
     }
-    amount = Math.max(1, Math.round(amount * 100) / 100);
     const input = findStakeInput();
     if (!input) {
       log('Stake: amount input not found — leaving the amount as-is.');
       return;
+    }
+    // The field is only touched when the stake actually changes: the same
+    // figure is never retyped, and under STAKE_HUMAN a figure close enough
+    // to the sizer's (and under the cap) is kept as it is.
+    const current = parseAmount(input.value);
+    if (current !== null && current > 0) {
+      if (current === amount) return;
+      const band = CONFIG.STAKE_HUMAN && CONFIG.STAKE_MODE !== 'fixed'
+        ? current * (CONFIG.STAKE_STICKY_PCT * profile.sticky / 100) : 0;
+      if (band > 0 && Math.abs(current - amount) <= band && current <= stakeCeiling()) {
+        log('Stake left at $' + current + ' (sizer: $' + amount + ', within ' + CONFIG.STAKE_STICKY_PCT + '%)');
+        return;
+      }
+    }
+    // Android: the figure is typed for real. The field is focused and its
+    // text selected here (both plain API calls, no synthetic events), the
+    // app then sends the digits as key events, and the click that follows
+    // queues up behind them (shim.js -> Bridge.type / Input).
+    if (nativeType(input, amount)) return;
+    // Elsewhere: typed key by key on the gesture timeline (humanType), the
+    // click queued behind it. The instant setter below is the fallback.
+    if (CONFIG.HUMAN_CLICK) {
+      const ms = humanType(input, String(amount));
+      if (ms !== null) {
+        log('Stake set to $' + amount + ' (' + CONFIG.STAKE_MODE + ') — typed, done in ' + (ms / 1000).toFixed(1) + ' s');
+        return;
+      }
     }
     try {
       const setter = Object.getOwnPropertyDescriptor(
@@ -2575,10 +3622,28 @@
       setter.call(input, String(amount));
       input.dispatchEvent(new Event('input', { bubbles: true }));
       input.dispatchEvent(new Event('change', { bubbles: true }));
-      log('Stake set to $' + amount);
+      log('Stake set to $' + amount + ' (' + CONFIG.STAKE_MODE + ')');
     } catch (error) {
       console.debug('[AutoTrade] Stake set failed:', error);
     }
+  }
+
+  /** The Android app types the stake (see setStake). True when it will. */
+  function nativeType(input, amount) {
+    const type = globalThis.__nexaNativeType;
+    if (typeof type !== 'function') return false;
+    const text = String(amount);
+    if (!/^[0-9.]{1,12}$/.test(text)) return false;
+    try {
+      input.focus();
+      input.select();
+    } catch (_) {
+      return false;
+    }
+    let queued = false;
+    try { queued = type(text) === true; } catch (_) { queued = false; }
+    if (queued) log('Stake typed: $' + amount + ' (' + CONFIG.STAKE_MODE + ')');
+    return queued;
   }
 
   /* =======================================================================
@@ -2830,6 +3895,8 @@
       pct: Number.isFinite(chosen.pct) ? chosen.pct : null,
       zScore: null,
       variantId: best.id,
+      // The evidence Kelly sizing runs on — the bound, never the raw ratio.
+      lowerBound: best.lowerBound,
       reason: 'auto ' + best.id + ' ' + describeRecord(best.stats, best.lowerBound),
     };
   }
@@ -2903,6 +3970,12 @@
     unconfirmedPauses: 0, // how often "clicks not registering" paused this run (backoff)
     account: null,       // 'demo' | 'live' — the route the run started on
     lastWhy: null,       // the caption's one-line reason from the last tick
+    hourlyTrades: [],     // timestamps of trades executed in the last 60 minutes
+    nextCooldownJitter: 0,// random jitter added to the cooldown after each trade
+    sessionStartedAt: 0,  // work interval reference for rest cycles
+    sessionDurationMs: 0, // randomized duration of the current work interval
+    pendingReaction: false,// true while a human reaction delay is running
+    missUntil: 0,         // a signal was let go on purpose (SKIP_SIGNAL_PCT): no clicks until then
   };
 
   // Live-account confirmation (CONFIG.LIVE_ACCOUNT === 'confirm'): a second
@@ -2918,19 +3991,102 @@
     return false;
   }
 
+  /* ---- Per-install timing profile ---------------------------------------
+     Two installs of this bot with the same numbers trade with the same
+     rhythm, and accounts that share a rhythm can be grouped. Each install
+     therefore draws its own multipliers once, keeps them in storage, and
+     applies them wherever a human-timing number is used: reaction delay,
+     cooldown jitter, work and rest intervals, the miss rate, the stake
+     stickiness, the pace of the mouse (move) and where on a button the
+     press tends to land (aimX/aimY: a fraction of its width/height off
+     centre, the habit of one hand). The popup shows the nominal numbers;
+     the effective ones are those times the profile, which is logged at
+     boot. */
+  const PROFILE_KEY = 'nexa.autotrade.profile';
+  const PROFILE_RANGES = Object.freeze({
+    reaction: [0.8, 1.4], jitter: [0.7, 1.6], session: [0.75, 1.35],
+    rest: [0.7, 1.6], skip: [0.7, 1.4], sticky: [0.8, 1.3],
+    move: [0.8, 1.3], aimX: [-0.08, 0.08], aimY: [-0.08, 0.08],
+  });
+  const profile = { reaction: 1, jitter: 1, session: 1, rest: 1, skip: 1, sticky: 1, move: 1, aimX: 0, aimY: 0 };
+
+  const profileValue = (key, value) => Number.isFinite(value) &&
+    value >= PROFILE_RANGES[key][0] && value <= PROFILE_RANGES[key][1];
+  /** A stored profile whose every value present is in range (a corrupt one is replaced whole). */
+  const profileUsable = (saved) => !!saved && typeof saved === 'object' &&
+    Object.keys(PROFILE_RANGES).every((key) => saved[key] === undefined || profileValue(key, saved[key]));
+
+  /**
+   * Loads the saved profile, or draws and saves a new one. Values a newer
+   * build added are drawn and stored beside the ones the install already
+   * had, so its rhythm stays what it was. Returns 'saved', 'extended' or
+   * 'new'.
+   */
+  function loadProfile() {
+    const keys = Object.keys(PROFILE_RANGES);
+    const saved = store.get(PROFILE_KEY);
+    const usable = profileUsable(saved);
+    const values = usable ? { ...saved } : { v: 1, created: Date.now() };
+    const missing = keys.filter((key) => values[key] === undefined);
+    let source = usable ? 'saved' : 'new';
+    if (missing.length > 0) {
+      const words = new Uint32Array(missing.length);
+      crypto.getRandomValues(words);
+      missing.forEach((key, index) => {
+        const [lo, hi] = PROFILE_RANGES[key];
+        values[key] = Math.round((lo + (words[index] / 0x100000000) * (hi - lo)) * 100) / 100;
+      });
+      store.set(PROFILE_KEY, values);
+      if (usable) source = 'extended';
+    }
+    for (const key of keys) profile[key] = values[key];
+    log('Timing profile (' + source + ', fixed for this install): ' +
+        keys.map((key) => (key.startsWith('aim')
+          ? key + ' ' + (profile[key] >= 0 ? '+' : '') + profile[key].toFixed(2)
+          : key + ' ×' + profile[key].toFixed(2))).join(', '));
+    return source;
+  }
+
+  const rollCooldownJitter = () => Math.floor((CONFIG.COOLDOWN_JITTER_MIN_MS +
+    Math.random() * (CONFIG.COOLDOWN_JITTER_MAX_MS - CONFIG.COOLDOWN_JITTER_MIN_MS)) * profile.jitter);
+  const rollSessionMs = () => Math.round((CONFIG.SESSION_WORK_MINUTES +
+    (Math.random() * 2 - 1) * CONFIG.SESSION_WORK_JITTER_MIN) * profile.session * 60_000);
+  const rollBreakMs = () => Math.max(60_000, Math.round((CONFIG.REST_BREAK_MINUTES +
+    (Math.random() * 2 - 1) * CONFIG.REST_BREAK_JITTER_MIN) * profile.rest * 60_000));
+
   /** The gap the bot keeps between trades right now (see COOLDOWN_FROM_EXPIRY). */
   function effectiveCooldownMs() {
     if (!CONFIG.COOLDOWN_FROM_EXPIRY) return CONFIG.TRADE_COOLDOWN_MS;
-    return Math.max(CONFIG.MIN_COOLDOWN_MS,
-      effectiveExpirySec() * 1000 + CONFIG.SETTLE_MARGIN_MS);
+    const base = Math.max(CONFIG.MIN_COOLDOWN_MS, effectiveExpirySec() * 1000 + CONFIG.SETTLE_MARGIN_MS);
+    return base + (bot.nextCooldownJitter || 0);
   }
 
   /** Caption: account badge · W-L · the running reason (or nothing when idle). */
+  // A short-lived caption line for events the tick loop would otherwise only
+  // log — the outcome of a click above all. On a phone there is no console
+  // and no hover tooltip, so this caption is the only place the user can see
+  // whether a trade actually registered, or why one did not fire.
+  let captionNotice = { text: '', until: 0 };
+  function notice(text, ms) {
+    captionNotice = { text, until: Date.now() + (ms || 6000) };
+    if (bot.running) setCaption(text);
+  }
+
   function refreshCaption() {
     const account = bot.running ? bot.account : accountType();
     const badge = account === 'live' ? 'LIVE' : account === 'demo' ? 'DEMO' : '—';
     const record = bot.wins + 'W-' + bot.losses + 'L';
+    if (bot.running && captionNotice.until > Date.now()) {
+      setCaption(captionNotice.text);
+      return;
+    }
     if (!bot.running) {
+      // A recent platform alarm stays on the caption for a while: the pill
+      // reverts to TAP TO RUN in seconds, and the reason must outlive that.
+      if (lastAlarm && Date.now() - lastAlarm.at < 10 * 60_000) {
+        setCaption('ALARM · ' + lastAlarm.reason);
+        return;
+      }
       setCaption(badge + ' · ' + record + (store.ready ? '' : ' · loading'));
       return;
     }
@@ -2997,8 +4153,19 @@
     }
     if (recent < CONFIG.MIN_TICKS_10S) return 'thin feed';
     if (now - feed.lastResetAt < CONFIG.POST_RESET_QUIET_MS) return 'stabilizing';
-    if (CONFIG.DAILY_LOSS_CAP > 0 && dailyPnl() <= -CONFIG.DAILY_LOSS_CAP) {
-      return 'daily cap';
+    // Daily limits are about real money: a dry run keeps going (nothing is
+    // at stake and its virtual P&L is not what the limits measure).
+    if (!CONFIG.DRY_RUN) {
+      const breach = dailyBreach(bot.account);
+      if (breach !== null) return breach;
+    }
+    // Hourly trade volume cap (anti-detection / pacing)
+    if (CONFIG.MAX_TRADES_PER_HOUR > 0 && !CONFIG.DRY_RUN && !CONFIG.SIGNAL_ONLY) {
+      const oneHourAgo = now - 3600_000;
+      bot.hourlyTrades = bot.hourlyTrades.filter((t) => t > oneHourAgo);
+      if (bot.hourlyTrades.length >= CONFIG.MAX_TRADES_PER_HOUR) {
+        return 'hour cap ' + bot.hourlyTrades.length + '/hr';
+      }
     }
     // The instant entry after Start is not a model signal, so the quality
     // gates below (candle alignment, edge over cost) do not apply to it —
@@ -3010,6 +4177,16 @@
     if (CONFIG.MIN_PAYOUT_PCT > 0 && panel.payoutPct !== null &&
         panel.payoutPct < CONFIG.MIN_PAYOUT_PCT) {
       return 'payout ' + panel.payoutPct + '%';
+    }
+    // The candle trend outranks a 2-minute signal — including the instant
+    // and keep-trading entries, which are short-trend tilts. Nothing is
+    // held while the candles are warming up (see CONFIG.HTF_FILTER).
+    if (CONFIG.HTF_FILTER && view && view.signal) {
+      const htf = htfView();
+      if (htf.warm && htf.dir !== null && htf.dir !== view.signal) return 'against candle trend';
+      if ((view.signal === 'UP' && htf.blockUp) || (view.signal === 'DOWN' && htf.blockDown)) {
+        return 'rsi stretched';
+      }
     }
     // An unreadable payout used to stand the filter aside — and the auto
     // bar then ASSUMED 85%. At a real payout of 70% that let the bot qualify
@@ -3054,6 +4231,7 @@
       "payout 70%" and "payout 72%" count as one gate. */
   function reasonBucket(view, veto) {
     if (veto && veto.startsWith('paused')) return 'held: paused';
+    if (veto && veto.startsWith('missed')) return 'held: missed on purpose';
     if (veto) return 'held: ' + veto.replace(/\s*[\d.]+%?/g, '');
     const reason = view.reason;
     if (reason.startsWith('auto ')) return view.signal ? 'auto signal' : 'auto armed';
@@ -3172,6 +4350,17 @@
       logScoreboard();
     }
 
+    // Natural human rest cycle breaks
+    if (CONFIG.REST_CYCLE_ENABLED && nowMs >= bot.pausedUntil) {
+      if (bot.sessionStartedAt && nowMs - bot.sessionStartedAt >= bot.sessionDurationMs) {
+        const breakMs = rollBreakMs();
+        bot.sessionStartedAt = nowMs + breakMs;
+        bot.sessionDurationMs = rollSessionMs();
+        pauseTrading(breakMs, 'natural rest break');
+        return;
+      }
+    }
+
     // A signal is necessary but not sufficient: the quality gates can still
     // hold it back, and the status line must say so — a held signal that
     // reads as plain "SIGNAL" looks like a bot that clicks nothing for no
@@ -3184,7 +4373,10 @@
       log('Pause over (' + bot.pauseReason + ') — trading resumes.');
       bot.pauseReason = null;
     }
-    const veto = paused || (view.signal ? tradeVeto(nowMs, view, instant) : null);
+    const missed = nowMs < bot.missUntil
+      ? 'missed on purpose ' + mmss(bot.missUntil - nowMs)
+      : null;
+    const veto = paused || missed || (view.signal ? tradeVeto(nowMs, view, instant) : null);
 
     // Surface the running analysis AND the blocking reason. Without the
     // reason, a bot that is working correctly but gated by a filter is
@@ -3192,6 +4384,7 @@
     // the caption the one-line why; the full readout goes on the tooltip.
     const drift = view.pct === null ? '--' : (view.pct >= 0 ? '+' : '') + view.pct.toFixed(3) + '%';
     const evidence = view.zScore === null ? '--' : 'z=' + view.zScore.toFixed(2);
+    const context = CONFIG.HTF_FILTER ? ' · ' + htfLabel(htfView()) : '';
     const warmupTarget = CONFIG.STRATEGY === 'momentum'
       ? CONFIG.EMA_SLOW + 2
       : CONFIG.STRATEGY === 'trend' ? 5
@@ -3204,7 +4397,7 @@
     bot.lastWhy = why;
     setStatus(
       (CONFIG.DRY_RUN ? 'Dry ' : '') +
-      (feed.symbol || '?') + ' ' + price + ' ' + drift + ' ' + evidence +
+      (feed.symbol || '?') + ' ' + price + ' ' + drift + ' ' + evidence + context +
       ' · ' + why + ' · ' + bot.wins + 'W-' + bot.losses + 'L $' + bot.pnl,
       'running'
     );
@@ -3221,8 +4414,112 @@
 
     if (nowMs - bot.lastTradeAt < effectiveCooldownMs()) return;
 
-    if (view.signal && !veto) executeTrade(view.signal, view.variantId, view.reason);
+    if (view.signal && !veto) {
+      if (!instant && !CONFIG.SIGNAL_ONLY && !bot.pendingReaction && skipThisSignal()) {
+        const rest = effectiveCooldownMs();
+        bot.missUntil = nowMs + rest;
+        log('Signal ' + view.signal + ' let go on purpose (SKIP_SIGNAL_PCT ' +
+            CONFIG.SKIP_SIGNAL_PCT + '%) — no click for ' + mmss(rest) + '.');
+        return;
+      }
+      if (CONFIG.REACTION_DELAY && !instant && !bot.pendingReaction) {
+        bot.pendingReaction = true;
+        const delayMs = Math.floor((CONFIG.REACTION_DELAY_MIN_MS + Math.random() * (CONFIG.REACTION_DELAY_MAX_MS - CONFIG.REACTION_DELAY_MIN_MS)) * profile.reaction);
+        const capturedSignal = view.signal;
+        const capturedVariantId = view.variantId;
+        const capturedReason = view.reason;
+        const capturedView = view;
+        const capturedRunId = bot.runId;
+        setTimeout(() => {
+          bot.pendingReaction = false;
+          if (!bot.running || bot.runId !== capturedRunId || Date.now() < bot.pausedUntil) return;
+          if (accountType() !== bot.account) return;
+          if (Date.now() - bot.lastTradeAt < effectiveCooldownMs()) return;
+          executeTrade(capturedSignal, capturedVariantId, capturedReason, capturedView);
+        }, delayMs);
+      } else if (!bot.pendingReaction) {
+        executeTrade(view.signal, view.variantId, view.reason, view);
+      }
+    }
   }
+
+  /** SKIP_SIGNAL_PCT: the roll that lets a model signal go by. */
+  function skipThisSignal() {
+    const pct = CONFIG.SKIP_SIGNAL_PCT;
+    return Number.isFinite(pct) && pct > 0 && Math.random() * 100 < Math.min(100, pct * profile.skip);
+  }
+
+  /* ---- Platform alarm (CONFIG.PLATFORM_ALARM) --------------------------
+     The platform showing a challenge or a warning is the one moment a bot
+     must not keep clicking. Three tells, cheapest first: the route (thrown
+     back to the login page), a captcha / human-check widget, and the text
+     of anything modal-like or notification-like that is actually visible.
+     The widget itself lives in a closed shadow root and is never matched. */
+  const ALARM_KEY = 'nexa.autotrade.alarm';
+  const ALARM_LOGIN_PATH = /\/(?:sign-?in|log-?in|auth)(?:\/|$)/i;
+  const ALARM_WIDGETS =
+    'iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="challenges.cloudflare.com"], ' +
+    'iframe[src*="turnstile"], iframe[src*="arkoselabs"], iframe[src*="geetest"], ' +
+    '.g-recaptcha, .h-captcha, .cf-turnstile, #challenge-form, #challenge-running, #cf-challenge-running';
+  const ALARM_SURFACES =
+    '[role="dialog"], [role="alertdialog"], [class*="modal"], [class*="popup"], [class*="notif"], ' +
+    '[class*="alert"], [class*="toast"], [class*="banner"], [class*="warning"]';
+  const ALARM_TEXT = new RegExp([
+    'unusual activity', 'suspicious activity',
+    'automated (?:activity|trading|software|access)',
+    '(?:bots?|robots?|scripts?|automation) (?:is|are) (?:not allowed|prohibited|forbidden)',
+    'account (?:has been |is |was )?(?:blocked|suspended|restricted|frozen|locked|disabled)',
+    'verify (?:that )?you(?:\'| a)?re (?:a )?human', 'are you a (?:robot|human)', 'i am not a robot',
+    'security check', 'too many requests', 'access denied',
+  ].join('|'), 'i');
+
+  /** What on the page says the platform is alarmed, or null. */
+  function platformAlarm() {
+    try {
+      if (ALARM_LOGIN_PATH.test(location.pathname)) return 'signed out — the platform wants a new login';
+      if (document.querySelector(ALARM_WIDGETS)) return 'captcha / human check on the page';
+      for (const node of document.querySelectorAll(ALARM_SURFACES)) {
+        const rect = node.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;   // not shown
+        const hit = ALARM_TEXT.exec((node.textContent || '').slice(0, 2000));
+        if (hit) return 'platform notice: "' + hit[0] + '"';
+      }
+    } catch (_) { /* a page mid-render — the next sweep will look again */ }
+    return null;
+  }
+
+  let lastAlarm = null;      // { at, reason, path } of the latest alarm this session
+  let alarmOnPage = null;    // the reason currently showing, so it is raised once
+
+  function raiseAlarm(reason) {
+    lastAlarm = { at: Date.now(), reason, path: location.pathname };
+    store.set(ALARM_KEY, lastAlarm);
+    const wasRunning = bot.running;
+    if (wasRunning) stopBot('Platform alarm — ' + reason);
+    else setStatus('Platform alarm — ' + reason, 'stopped');
+    refreshCaption();
+    log('PLATFORM ALARM: ' + reason + (wasRunning ? ' — the run was stopped.' : '.') +
+        ' Use the platform by hand for a while; start the bot again only once the page is normal.');
+    beep('DOWN');
+    setTimeout(() => beep('DOWN'), 450);
+    setTimeout(() => beep('DOWN'), 900);
+    if (typeof globalThis.__nexaNotify === 'function') {
+      try { globalThis.__nexaNotify('Nexa AI Bot — platform alarm: ' + reason); } catch (_) { /* toast is best-effort */ }
+    }
+  }
+
+  function alarmSweep() {
+    if (!CONFIG.PLATFORM_ALARM) return;
+    const reason = platformAlarm();
+    if (reason === null) {
+      alarmOnPage = null;
+      return;
+    }
+    if (reason === alarmOnPage && !bot.running) return;   // said once; a run in progress still stops
+    alarmOnPage = reason;
+    raiseAlarm(reason);
+  }
+  setInterval(alarmSweep, CONFIG.PLATFORM_ALARM_EVERY_MS);
 
   function startBot() {
     if (bot.running) return;
@@ -3253,6 +4550,12 @@
     if (account === 'unknown') {
       log('Cannot start: this is not the trading page (/trade or /demo-trade).');
       setStatus('Not a trading page', 'stopped');
+      return;
+    }
+    const alarm = CONFIG.PLATFORM_ALARM ? platformAlarm() : null;
+    if (alarm) {
+      log('Cannot start: platform alarm — ' + alarm + '. Deal with it by hand first.');
+      setStatus('Platform alarm — ' + alarm, 'stopped');
       return;
     }
     if (account === 'live' && !liveAllowed()) {
@@ -3293,10 +4596,28 @@
                      : 'Chart not identified', 'stopped');
       return;
     }
-    if (CONFIG.DAILY_LOSS_CAP > 0 && dailyPnl() <= -CONFIG.DAILY_LOSS_CAP) {
-      log('Cannot start: daily loss cap already reached ($' + dailyPnl() + ').');
-      setStatus('Daily loss cap reached', 'stopped');
-      return;
+    // Real money: pin today's base balance for this account (first real
+    // start of the day records it) and refuse a day that already ended.
+    if (!CONFIG.DRY_RUN) {
+      const start = dailyStartBalance(account);
+      const breach = dailyBreach(account);
+      if (breach === 'daily cap') {
+        log('Cannot start: daily loss cap already reached ($' + dailyPnl(account) +
+            ' on ' + account + ').');
+        setStatus('Daily loss cap reached', 'stopped');
+        return;
+      }
+      if (breach === 'daily target') {
+        log('Cannot start: daily profit target already reached ($' + dailyPnl(account) +
+            ' on ' + account + '). Tomorrow is another day.');
+        setStatus('Daily profit target reached', 'stopped');
+        return;
+      }
+      if (start === null && CONFIG.DAILY_LOSS_CAP_PCT > 0 && CONFIG.DAILY_LOSS_CAP <= 0) {
+        log('Daily limits: the ' + account + ' balance is not known yet, so the ' +
+            CONFIG.DAILY_LOSS_CAP_PCT + '% cap cannot be measured — set DAILY_LOSS_CAP ' +
+            '(dollars) for a hard rail until the feed reports it.');
+      }
     }
     updateTradePanel();
     applyHorizon();   // tune the windows to this contract before announcing them
@@ -3323,6 +4644,11 @@
     // and the first tick below is where it happens.
     bot.instantUntil = CONFIG.TRADE_ON_START ? Date.now() + CONFIG.INSTANT_START_WINDOW_MS : 0;
     bot.runStartedAt = Date.now();
+    bot.sessionStartedAt = Date.now();
+    bot.sessionDurationMs = rollSessionMs();
+    bot.nextCooldownJitter = 0;
+    bot.pendingReaction = false;
+    bot.missUntil = 0;
     bot.pausedUntil = 0;
     bot.pauseReason = null;
     bot.unconfirmedPauses = 0;
@@ -3384,6 +4710,7 @@
   function stopBot(reason) {
     if (!bot.running) return;
     bot.running = false;
+    bot.pendingReaction = false;
 
     if (bot.timerId) {
       clearInterval(bot.timerId);
@@ -3414,10 +4741,13 @@
   // Everything persisted arrives together once chrome.storage has answered
   // (a few ms; the pill says LOADING if tapped before that).
   loadStore((lifted) => {
-    // The settings panel, the dry-run toggle and the recorder button are
-    // gone; their stored values would otherwise silently override CONFIG
-    // with no way to see or change them.
+    // The old settings panel, dry-run toggle and recorder button are gone;
+    // their stored values would otherwise silently override CONFIG with no
+    // way to see or change them. The popup's prefs are the one override
+    // that IS visible — applied here, and again on every change.
     for (const key of [SETTINGS_KEY, DRY_RUN_KEY, REC_KEY]) store.remove(key);
+    applyPrefs(store.get(PREFS_KEY), 'saved');
+    loadProfile();
     requestAnimationFrame(() => restorePosition(ui.root));
     refreshCaption();
     if (lifted.length > 0) {
@@ -3468,7 +4798,7 @@
   //   __nexaDebug.recorder.enabled = true        // journal ticks for tools/backtest.js
   //   __nexaDebug.exportTicks(); __nexaDebug.exportTradesCsv();
   //   __nexaDebug.scoreboard()                   // auto-mode records
-  globalThis.__nexaDebug = Object.freeze({
+  hiddenGlobal('__nexaDebug', Object.freeze({
     get panel() { return panel; },
     get bot() { return bot; },
     get feed() { return feed; },
@@ -3481,7 +4811,128 @@
     exportTradesCsv,
     scoreboard: () => (auto.stats === null ? [] : scoreboardLines()),
     scanner: () => scannerTop(8),
-  });
+    htf: htfView,
+    simulateClick,
+    humanClick,
+    humanType,
+    landingPoint,
+    get gesture() { return gesture; },
+    get realPointer() { return realPointer; },
+    get pointerState() { return pointerState; },
+    setStake,
+    get alarm() { return lastAlarm; },
+    platformAlarm,
+    get profile() { return { ...profile }; },
+    loadProfile,
+    // The storage cache, for the smoke harness (chrome.storage is loaded once).
+    store: { get: (key) => store.get(key), set: (key, value) => store.set(key, value), remove: (key) => store.remove(key) },
+  }));
 
+  /* =======================================================================
+     7b. Settings + popup channel
+
+     The popup (popup.js) edits the user-facing subset of CONFIG described
+     in settings.js and stores only the values that differ from the
+     defaults under PREFS_KEY. This side sanitizes and applies them at boot
+     and on every change, so a knob turned in the popup takes effect on the
+     next tick — mid-run included; every knob is read where it is used.
+     The popup also asks for a status snapshot once a second while open and
+     sends Start / Stop / export commands, all over chrome.runtime messages
+     (only the extension's own pages can send those).
+     ======================================================================= */
+
+  /**
+   * Lay the saved overrides over CONFIG; every schema key the overrides do
+   * not mention goes back to its default. Invalid values are ignored, not
+   * clamped — a money knob outside its rails must fall back to the default
+   * rather than to something the user never typed.
+   * @returns {string[]} the "KEY=value" changes applied
+   */
+  function applyPrefs(raw, source) {
+    const { overrides, rejected } = NexaSettings.sanitize(raw);
+    const changed = [];
+    for (const row of NexaSettings.SCHEMA) {
+      const next = Object.prototype.hasOwnProperty.call(overrides, row.key)
+        ? overrides[row.key] : USER_DEFAULTS[row.key];
+      if (CONFIG[row.key] === next) continue;
+      CONFIG[row.key] = next;
+      changed.push(row.key + '=' + next);
+    }
+    recorder.enabled = CONFIG.RECORD_TICKS;
+    if (rejected.length > 0) {
+      log('Settings: ignored invalid value(s) for ' + rejected.join(', ') + ' — defaults kept.');
+    }
+    if (changed.length > 0) log('Settings (' + source + '): ' + changed.join(', '));
+    return changed;
+  }
+
+  if (store.area && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !changes || !changes[PREFS_KEY]) return;
+      const next = changes[PREFS_KEY].newValue;
+      if (next === undefined) store.cache.delete(PREFS_KEY);
+      else store.cache.set(PREFS_KEY, next);
+      applyPrefs(next, 'popup');
+    });
+  }
+
+  /** What the popup shows: the pill, the counters, today's limits, the
+      candle context, the recorder — nothing the widget does not already know. */
+  function statusSnapshot() {
+    const account = bot.running ? bot.account : accountType();
+    const limits = dailyLimits(account);
+    const best = CONFIG.STRATEGY === 'auto' && auto.stats !== null ? currentBestQualified() : null;
+    return {
+      running: bot.running,
+      state: ui.root.dataset.state,
+      pill: ui.pillText.textContent,
+      account,
+      balance: accountBalance(account),
+      dry: CONFIG.DRY_RUN,
+      symbol: feed.symbol,
+      price: readCurrentPrice(),
+      wins: bot.wins,
+      losses: bot.losses,
+      pnl: bot.pnl,
+      trades: bot.tradeCount,
+      why: bot.running ? bot.lastWhy : null,
+      htf: CONFIG.HTF_FILTER && symbolLock.key ? htfLabel(htfView()) : null,
+      qualified: best === null ? null
+        : 'auto ' + best.id + ' ' + describeRecord(best.stats, best.lowerBound) + ' armed',
+      daily: { pnl: limits.today, start: limits.start, cap: limits.cap, target: limits.target },
+      recorder: { enabled: recorder.enabled, rows: recorder.count, open: recorder.db !== null },
+    };
+  }
+
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!message || typeof message.type !== 'string') return false;
+      switch (message.type) {
+        case 'nexa:status': sendResponse(statusSnapshot()); break;
+        case 'nexa:start': startBot(); sendResponse(statusSnapshot()); break;
+        case 'nexa:stop': stopBot(); sendResponse(statusSnapshot()); break;
+        case 'nexa:export-ticks': exportRecording(); sendResponse({ ok: true }); break;
+        case 'nexa:export-trades': exportTradesCsv(); sendResponse({ ok: true }); break;
+        case 'nexa:log': sendResponse({ lines: logLines.slice(), environment: environment }); break;
+        case 'nexa:export-log': exportLog(); sendResponse({ ok: true }); break;
+        default: return false;
+      }
+      return false;
+    });
+  }
+
+  /** The log tail as a text file — Downloads/NexaAIBot on the phone. */
+  function exportLog() {
+    try {
+      const lines = [environment].concat(logLines.map((line) => new Date(line.t).toISOString() + '  ' + line.text));
+      downloadBlob(new Blob([lines.join('\n') + '\n'], { type: 'text/plain' }), 'nexa-log-' + fileStamp() + '.txt');
+      log('Exported', logLines.length, 'log lines.');
+    } catch (error) {
+      log('Log export failed:', error);
+    }
+  }
+
+  const environment = environmentLine();
+  log(environment);
   log('Loaded. Tap the pill to start.');
 })();

@@ -76,7 +76,7 @@ test('PAYOUT_RE accepts the payout label forms and nothing else', () => {
   for (const bad of ['85', '+85 percent', '%85', '8.5%', '85%%']) assert.ok(!PAYOUT_RE.test(bad), bad);
 });
 
-const accountSrc = grab('  function accountType() {', '  /**\n   * Dispatch a full pointer+mouse sequence.');
+const accountSrc = grab('  function accountType() {', '  /**\n   * Android app: tap the screen for real');
 
 test('accountType is decided by the route and fails closed on anything unknown', () => {
   const at = (pathname) => new Function('location', 'console', accountSrc + '\nreturn accountType();')(

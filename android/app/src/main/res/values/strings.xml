@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Nexa AI Bot</string>
+    <string name="settings_title">Nexa AI Bot — settings</string>
+    <string name="open_settings">Open settings and status</string>
+    <string name="start_url">https://market-qx.trade/en/demo-trade</string>
+</resources>

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
   efficiencyRatio, percentile, gapFreeSuffix, settlePendings, recordOutcome,
-  statsOf, breakEvenRate, wilsonLowerBound, bestQualified,
+  statsOf, breakEvenRate, wilsonLowerBound, bestQualified, kellyStake, humanStake,
 } = require('../autopilot.js');
 
 test('efficiencyRatio: straight trend is 1, pure chop is ~0, short history is null', () => {
@@ -145,4 +145,81 @@ test('a coin-flip pool almost never qualifies under the live bar', () => {
   }
   // The old bar (raw ratio, 30 samples, 4 points) armed ~50% of the time here.
   assert.ok(armedTicks / trials < 0.02, 'armed ' + (armedTicks / trials * 100).toFixed(1) + '% of the time');
+});
+
+/* ---- kellyStake ----------------------------------------------------------- */
+
+const KELLY = { balance: 10_000, payoutPct: 85, fraction: 0.25, maxPct: 5, minStake: 1 };
+
+test('kellyStake: full Kelly f* = p - (1-p)/b, scaled by the fraction', () => {
+  // p = 0.60, b = 0.85: f* = 0.60 - 0.40/0.85 = 0.129411..., quarter Kelly = 3.235% of $10,000
+  assert.equal(kellyStake({ ...KELLY, hitRate: 0.6 }), 323.53);
+  // full Kelly (fraction 1) is four times that — once the 5% cap is lifted
+  assert.equal(kellyStake({ ...KELLY, hitRate: 0.6, fraction: 1, maxPct: 100 }), 1294.12);
+});
+
+test('kellyStake: the cap binds, the floor binds', () => {
+  // p = 0.80: f* = 0.8 - 0.2/0.85 = 0.5647, quarter = 14.1% -> capped at 5% = $500
+  assert.equal(kellyStake({ ...KELLY, hitRate: 0.8 }), 500);
+  // a tiny edge on a small balance rounds below the platform minimum -> $1
+  assert.equal(kellyStake({ ...KELLY, balance: 20, hitRate: 0.56 }), 1);
+  assert.equal(kellyStake({ ...KELLY, balance: 20, hitRate: 0.56, minStake: 2.5 }), 2.5);
+});
+
+test('kellyStake: no evidence or no edge sizes to the minimum, never to zero', () => {
+  assert.equal(kellyStake({ ...KELLY, hitRate: null }), 1);
+  assert.equal(kellyStake({ ...KELLY, hitRate: NaN }), 1);
+  // break-even at 85% is 54.05%: at or below it there is no positive Kelly fraction
+  assert.equal(kellyStake({ ...KELLY, hitRate: 0.54 }), 1);
+  assert.equal(kellyStake({ ...KELLY, hitRate: 0.5 }), 1);
+  assert.equal(kellyStake({ ...KELLY, hitRate: 1 }), 1);       // a "certain" record is not evidence
+  assert.equal(kellyStake({ ...KELLY, hitRate: 0 }), 1);
+});
+
+test('kellyStake: unknown balance or payout (or junk knobs) is null — leave the amount alone', () => {
+  assert.equal(kellyStake({ ...KELLY, balance: null, hitRate: 0.6 }), null);
+  assert.equal(kellyStake({ ...KELLY, balance: 0, hitRate: 0.6 }), null);
+  assert.equal(kellyStake({ ...KELLY, payoutPct: null, hitRate: 0.6 }), null);
+  assert.equal(kellyStake({ ...KELLY, fraction: 0, hitRate: 0.6 }), null);
+  assert.equal(kellyStake({ ...KELLY, maxPct: -1, hitRate: 0.6 }), null);
+  assert.equal(kellyStake({ ...KELLY, minStake: 0, hitRate: 0.6 }), null);
+  assert.equal(kellyStake(null), null);
+});
+
+test('kellyStake: the lower bound, not the raw ratio, is what should be passed', () => {
+  // The same 60% observed on 20 vs 300 outcomes: the bound (the intended input)
+  // sizes the thin record to the floor and the deep one to a real stake.
+  const thin = wilsonLowerBound(12, 20, 2.0);
+  const deep = wilsonLowerBound(180, 300, 2.0);
+  assert.equal(kellyStake({ ...KELLY, hitRate: thin }), 1);
+  assert.ok(kellyStake({ ...KELLY, hitRate: deep }) > 1);
+});
+
+/* ---- humanStake ----------------------------------------------------------- */
+
+test('humanStake: rounds DOWN to a figure a person types, never below the minimum', () => {
+  assert.equal(humanStake(2.37, 1), 2);
+  assert.equal(humanStake(2.64, 1), 2);
+  assert.equal(humanStake(4.99, 1), 3);
+  assert.equal(humanStake(5, 1), 5);
+  assert.equal(humanStake(9.99, 1), 5);
+  assert.equal(humanStake(10, 1), 10);
+  assert.equal(humanStake(14.9, 1), 10);
+  assert.equal(humanStake(15, 1), 15);
+  assert.equal(humanStake(23, 1), 20);
+  assert.equal(humanStake(27, 1), 25);
+  assert.equal(humanStake(49, 1), 40);
+  assert.equal(humanStake(74, 1), 50);
+  assert.equal(humanStake(75, 1), 75);
+  assert.equal(humanStake(149, 1), 100);
+  assert.equal(humanStake(1234, 1), 1000);
+  assert.equal(humanStake(2600, 1), 2500);
+  // the platform minimum wins over the ladder, whatever figure it is
+  assert.equal(humanStake(0.4, 1), 1);
+  assert.equal(humanStake(2.9, 2.5), 2.5);
+  assert.equal(humanStake(1.2, 1), 1);
+  // garbage in: the minimum
+  assert.equal(humanStake(NaN, 1), 1);
+  assert.equal(humanStake(-3, 1), 1);
+  assert.equal(humanStake(3, NaN), 3);
 });

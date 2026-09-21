@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nexa AI Bot</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="head">
+    <img class="mark" src="icons/icon48.png" alt="" width="34" height="34">
+    <div class="head-text">
+      <h1>Nexa AI Bot</h1>
+      <span class="version" id="version"></span>
+    </div>
+    <!-- DEMO / LIVE, from the active tab's route; "—" when there is no page. -->
+    <span class="badge" id="account" data-account="">—</span>
+  </header>
+
+  <!-- Bot view: the balance hero, four tiles, today's two rails, the buttons.
+       data-state on the hero drives the pill colours exactly like the
+       widget's pill (idle | running | paused | error | confirm). -->
+  <main id="view-bot" class="view">
+    <section class="hero" id="status" data-state="idle" aria-live="polite">
+      <div class="hero-label" id="balance-label">Balance</div>
+      <div class="hero-balance" id="balance">$—</div>
+      <div class="hero-row">
+        <span class="pill"><span class="dot" aria-hidden="true"></span><span id="pill">…</span></span>
+        <span class="hero-sub" id="symbol">—</span>
+      </div>
+    </section>
+
+    <p class="note" id="note" hidden></p>
+
+    <dl class="tiles">
+      <div class="tile"><dt>Session</dt><dd id="session">—</dd><dd class="sub" id="session-sub"></dd></div>
+      <div class="tile"><dt>Today</dt><dd id="today">—</dd><dd class="sub" id="today-sub"></dd></div>
+      <div class="tile"><dt>Signal</dt><dd id="why">—</dd><dd class="sub" id="htf"></dd></div>
+      <div class="tile"><dt>Auto mode</dt><dd id="auto">—</dd><dd class="sub" id="auto-sub"></dd></div>
+    </dl>
+
+    <section class="card rails" aria-label="Daily limits">
+      <div class="rail">
+        <div class="rail-head"><span>Daily loss cap</span><b id="cap-text">off</b></div>
+        <div class="track"><div class="fill red" id="cap-fill"></div></div>
+      </div>
+      <div class="rail">
+        <div class="rail-head"><span>Profit target</span><b id="target-text">off</b></div>
+        <div class="track"><div class="fill green" id="target-fill"></div></div>
+      </div>
+    </section>
+
+    <div class="actions">
+      <button id="toggle" class="btn primary" type="button" disabled>Start bot</button>
+      <!-- A quick flip of the Signal-only knob; the same setting sits in the form. -->
+      <button id="signal-only" class="btn" type="button" aria-pressed="false">Signal only</button>
+    </div>
+
+    <section class="card data">
+      <span class="muted" id="recorder">Recorder off</span>
+      <button id="export-ticks" class="btn small" type="button" disabled>Export ticks</button>
+      <button id="export-trades" class="btn small" type="button" disabled>Trades CSV</button>
+    </section>
+  </main>
+
+  <!-- Log view: the content script's last lines, newest first, refreshed
+       every second while open. The first line of every log says what the
+       site sees (UA, platform, screen, touch, GPU). Export writes the tail
+       to a text file (Downloads/NexaAIBot on the phone). -->
+  <main id="view-log" class="view" hidden>
+    <div class="view-head">
+      <h2>Log</h2>
+      <button id="export-log" class="btn ghost small" type="button" disabled>Export</button>
+    </div>
+    <p class="note" id="log-note" hidden></p>
+    <p class="env" id="environment" hidden></p>
+    <ol id="log" class="log" aria-live="off"></ol>
+  </main>
+
+  <!-- Settings view: built from settings.js's SCHEMA at load; every change saves at once. -->
+  <main id="view-settings" class="view" hidden>
+    <div class="view-head">
+      <h2>Settings</h2>
+      <button id="reset" class="btn ghost small" type="button">Reset to defaults</button>
+    </div>
+    <form id="settings" class="settings" autocomplete="off"></form>
+  </main>
+
+  <nav class="nav" aria-label="Sections">
+    <!-- Only the Android app shows Trade: it closes this screen (see popup-shim.js). -->
+    <button id="nav-trade" class="nav-item" type="button" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 3 5-6"/></svg>
+      <span>Trade</span>
+    </button>
+    <button class="nav-item active" type="button" data-view="bot" aria-current="page">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="7" width="16" height="12" rx="4"/><path d="M12 7V4"/><circle cx="12" cy="3" r="1"/><circle cx="9" cy="13" r="1.2"/><circle cx="15" cy="13" r="1.2"/></svg>
+      <span>Bot</span>
+    </button>
+    <button class="nav-item" type="button" data-view="log">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h10"/></svg>
+      <span>Log</span>
+    </button>
+    <button class="nav-item" type="button" data-view="settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      <span>Settings</span>
+    </button>
+  </nav>
+  <span id="saved" class="saved" hidden>Saved ✓</span>
+
+  <script src="settings.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

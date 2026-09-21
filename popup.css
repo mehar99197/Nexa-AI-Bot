@@ -1,0 +1,465 @@
+/* ==========================================================================
+   Nexa AI Bot — popup / Android settings screen. Same palette as the
+   floating card (style.css): near-black navy, purple→blue neon, one pill
+   that says what the bot is doing. Everything is data-driven from
+   settings.js; this only paints it.
+
+   No backdrop-filter anywhere: the Android settings screen runs in its own
+   WebView on phones that cannot afford it, and the cards are opaque anyway.
+   ========================================================================== */
+
+:root {
+  --bg: #0b1020;
+  --surface: #121a33;
+  --surface-2: rgba(18, 26, 51, 0.6);
+  --input: #0b1020;
+  --line: rgba(167, 139, 250, 0.22);
+  --text: #e6e9f5;
+  --muted: #8b93b8;
+  --blue: #60a5fa;
+  --violet: #a78bfa;
+  --pink: #f0abfc;
+  --accent: #7c3aed;
+  --accent-soft: rgba(139, 92, 246, 0.18);
+  --on-accent: #ffffff;
+  --green: #34d399;
+  --red: #f87171;
+  --amber: #fbbf24;
+  --radius: 18px;
+  --radius-sm: 12px;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --grad: linear-gradient(90deg, #60a5fa 0%, #a78bfa 52%, #f0abfc 100%);
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; }
+
+body {
+  width: 360px;   /* Chrome sizes the popup window to the body */
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 var(--font);
+  padding: 12px 12px 74px;   /* room for the fixed nav */
+}
+
+/* On a touch screen (the Android app renders this page full-width) the
+   fixed popup width would leave a strip of empty space or overflow. */
+@media (pointer: coarse) {
+  body { width: auto; max-width: 480px; margin: 0 auto; padding-bottom: 88px; }
+}
+
+h1, h2 { margin: 0; }
+
+.muted { color: var(--muted); }
+
+/* ---- header ---------------------------------------------------------- */
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.head .mark {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  padding: 2px;
+  box-shadow: 0 0 10px rgba(167, 139, 250, 0.35);
+}
+
+.head-text { display: flex; flex-direction: column; gap: 0; flex: 1; min-width: 0; }
+
+.head h1 {
+  font-size: 16px;
+  font-weight: 800;
+  background: var(--grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.version { font-size: 11px; color: var(--muted); }
+
+.badge {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+.badge[data-account="demo"] { color: var(--amber); border-color: rgba(251, 191, 36, 0.5); background: rgba(251, 191, 36, 0.1); }
+.badge[data-account="live"] { color: var(--red); border-color: rgba(248, 113, 113, 0.6); background: rgba(248, 113, 113, 0.12); }
+
+/* ---- views ----------------------------------------------------------- */
+
+.view { display: flex; flex-direction: column; gap: 10px; }
+.view[hidden] { display: none; }
+
+.view-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 2px 0;
+}
+
+.view-head h2 { font-size: 17px; font-weight: 800; }
+
+/* ---- the hero card --------------------------------------------------- */
+
+.hero {
+  /* The card's purple bloom bottom-left and cool rim light top-right, the
+     same lighting as the floating card. */
+  background:
+    radial-gradient(125% 95% at 16% 112%, rgba(139, 92, 246, 0.42) 0%, rgba(139, 92, 246, 0) 62%),
+    radial-gradient(115% 85% at 104% -8%, rgba(56, 189, 248, 0.24) 0%, rgba(56, 189, 248, 0) 58%),
+    var(--surface);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.45), 0 0 22px rgba(139, 92, 246, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.hero-label { font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+
+.hero-balance {
+  font-size: 34px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+}
+
+.hero-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; min-width: 0; }
+
+.hero-sub {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(139, 92, 246, 0.14);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+
+.hero[data-state="running"] .pill { background: rgba(124, 58, 237, 0.55); border-color: rgba(167, 139, 250, 0.7); color: #fff; }
+.hero[data-state="running"] .dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.hero[data-state="paused"] .pill { border-color: rgba(251, 191, 36, 0.6); }
+.hero[data-state="paused"] .dot { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+.hero[data-state="error"] .pill { background: rgba(220, 38, 38, 0.45); border-color: rgba(248, 113, 113, 0.7); color: #fff; }
+.hero[data-state="error"] .dot { background: var(--red); }
+.hero[data-state="confirm"] .pill { background: rgba(220, 38, 38, 0.6); border-color: rgba(248, 113, 113, 0.8); color: #fff; animation: blink 0.9s ease-in-out infinite; }
+.hero[data-state="confirm"] .dot { background: #fff; }
+
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+.note {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(251, 191, 36, 0.1);
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  font-size: 12px;
+  color: var(--amber);
+}
+
+/* ---- tiles ----------------------------------------------------------- */
+
+.tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 0;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 11px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  min-width: 0;
+}
+
+.tile dt { font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
+.tile dd { margin: 0; font-size: 15px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile dd.sub { font-size: 10.5px; font-weight: 500; color: var(--muted); min-height: 1.3em; }
+
+/* ---- cards ----------------------------------------------------------- */
+
+.card {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+}
+
+.rails { display: flex; flex-direction: column; gap: 10px; }
+.rail { display: flex; flex-direction: column; gap: 5px; }
+.rail-head { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+.rail-head b { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
+.track { height: 6px; border-radius: 999px; background: rgba(167, 139, 250, 0.16); overflow: hidden; }
+.fill { height: 100%; width: 0; border-radius: 999px; transition: width 0.3s ease; }
+.fill.red { background: var(--red); }
+.fill.green { background: var(--green); }
+
+.data { display: flex; align-items: center; gap: 8px; }
+.data .muted { flex: 1; font-size: 12px; }
+
+/* ---- log ------------------------------------------------------------- */
+
+.env {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  font: 10.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  word-break: break-word;
+}
+.log { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.log li {
+  padding: 6px 8px;
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.log li time { color: var(--muted); margin-right: 8px; font-variant-numeric: tabular-nums; }
+.log li.trade { border-left-color: var(--blue); }
+.log li.alarm { border-left-color: var(--red); }
+
+/* ---- buttons ---------------------------------------------------------- */
+
+.btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(139, 92, 246, 0.14);
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s;
+}
+
+.btn:hover:not(:disabled) { background: rgba(139, 92, 246, 0.3); border-color: rgba(167, 139, 250, 0.6); }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+.btn.small { height: 34px; padding: 0 12px; font-size: 11.5px; }
+.btn.ghost { background: transparent; color: var(--muted); }
+
+.btn.primary {
+  background: var(--grad);
+  border: 0;
+  color: #0b1020;
+  box-shadow: 0 8px 20px rgba(139, 92, 246, 0.3);
+}
+.btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
+.hero[data-state="running"] ~ .actions .btn.primary,
+.hero[data-state="paused"] ~ .actions .btn.primary {
+  background: rgba(248, 113, 113, 0.9);
+  color: #fff;
+  box-shadow: 0 8px 20px rgba(248, 113, 113, 0.25);
+}
+
+/* The Signal-only quick toggle reads as "on" in violet. */
+.btn[aria-pressed="true"] { background: rgba(124, 58, 237, 0.5); border-color: rgba(167, 139, 250, 0.8); color: #fff; }
+
+.actions { display: flex; gap: 10px; }
+.actions .btn { flex: 1; }
+
+/* ---- settings form ---------------------------------------------------- */
+
+.settings { display: flex; flex-direction: column; gap: 10px; }
+
+.settings fieldset {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0;
+  margin: 0;
+  background: var(--surface-2);
+  overflow: hidden;
+  min-width: 0;
+}
+
+.settings legend {
+  /* A legend cannot be a flex item of the fieldset, so it is laid out as
+     the first row: icon + uppercase group name in the accent colour. */
+  float: left;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 6px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--violet);
+}
+
+.settings legend svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+
+.field {
+  clear: both;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "name input" "help help";
+  align-items: center;
+  gap: 2px 10px;
+  padding: 9px 12px;
+  border-top: 1px solid rgba(167, 139, 250, 0.1);
+}
+
+.field .name { grid-area: name; font-weight: 600; font-size: 12.5px; }
+.field .help { grid-area: help; font-size: 11px; color: var(--muted); }
+
+.field input[type="number"],
+.field select {
+  grid-area: input;
+  width: 108px;
+  height: 32px;
+  background: var(--input);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 9px;
+  font: inherit;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.field select { width: auto; min-width: 96px; padding-right: 6px; }
+.field select option { background: var(--surface); color: var(--text); }
+
+/* Checkboxes are drawn as switches: track + knob, violet when on. */
+.field input[type="checkbox"] {
+  grid-area: input;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 40px;
+  height: 22px;
+  margin: 0;
+  border-radius: 999px;
+  background: rgba(167, 139, 250, 0.22);
+  border: 0;
+  position: relative;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.field input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #e6e9f5;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transition: transform 0.15s;
+}
+.field input[type="checkbox"]:checked { background: var(--accent); }
+.field input[type="checkbox"]:checked::after { transform: translateX(18px); background: #fff; }
+
+.field input:focus-visible, .field select:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.field.invalid input { border-color: var(--red); box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.25); }
+.field.changed .name::after { content: " •"; color: var(--pink); }
+
+/* ---- bottom nav -------------------------------------------------------- */
+
+.nav {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 480px;
+  display: flex;
+  padding: 6px 8px 8px;
+  background: #0e1530;
+  border-top: 1px solid var(--line);
+  z-index: 2;
+}
+
+.nav-item {
+  appearance: none;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 6px 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  border-radius: 12px;
+}
+.nav-item[hidden] { display: none; }
+.nav-item svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.nav-item.active { color: var(--violet); }
+.nav-item:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+
+.saved {
+  position: fixed;
+  left: 50%;
+  bottom: 70px;
+  transform: translateX(-50%);
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--green);
+  color: #06130a;
+  font-size: 12px;
+  font-weight: 700;
+  z-index: 3;
+}

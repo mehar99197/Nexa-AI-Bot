@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Nexa AI Bot",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Nexa AI trading assistant that runs on the Quotex trading platform.",
 
   "minimum_chrome_version": "111",
@@ -11,6 +11,15 @@
     "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
+  },
+
+  "action": {
+    "default_title": "Nexa AI Bot — settings & status",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
   },
 
   "permissions": [
@@ -59,6 +68,8 @@
         "strategy.js",
         "autopilot.js",
         "horizons.js",
+        "candles.js",
+        "settings.js",
         "content.js"
       ],
       "run_at": "document_start",
