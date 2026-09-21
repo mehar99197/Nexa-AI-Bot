@@ -252,6 +252,10 @@ h1, h2 { margin: 0; }
   border-radius: var(--radius-sm);
   word-break: break-word;
 }
+/* The identity cross-check under the environment line: green when the
+   signals agree, red with a name for what disagreed when they do not. */
+.env.verdict { margin-top: -6px; color: var(--green); }
+.env.verdict.bad { color: var(--red); border-color: rgba(248, 113, 113, 0.6); }
 .log { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .log li {
   padding: 6px 8px;

@@ -10,7 +10,6 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import androidx.webkit.UserAgentMetadata
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
@@ -21,8 +20,10 @@ import org.json.JSONObject
  * A WebView with the bot inside: the Quotex web platform plus the
  * extension's files (assets/bot, copied from the repository root at build
  * time) injected at document start behind assets/shim.js, which stands in
- * for chrome.storage / chrome.runtime. The desktop site is requested because
- * the bot's DOM heuristics were verified on the desktop layout.
+ * for chrome.storage / chrome.runtime. The WebView keeps the device's own
+ * identity — its real Android User-Agent, platform and client hints — so no
+ * signal it reports contradicts another; content.js logs that cross-check at
+ * boot. Navigation stays on the trading domains (shouldOverrideUrlLoading).
  */
 class BotWebView(context: Context) {
 
@@ -44,19 +45,7 @@ class BotWebView(context: Context) {
         settings.builtInZoomControls = true
         settings.displayZoomControls = false
         settings.mediaPlaybackRequiresUserGesture = false   // the trade beep
-        val chromeVersion = chromeVersionOf(settings.userAgentString)
-        settings.userAgentString = desktopUserAgent(chromeVersion)
-        // The client hints must tell the same story as the User-Agent. Left
-        // alone, the low-entropy hints — the Sec-CH-UA-* headers and
-        // navigator.userAgentData — still describe an Android WebView on a
-        // phone (mobile, platform Android, brand "Android WebView") under a
-        // desktop Linux UA, which any script can read in one line. This is
-        // the identity Chrome itself presents in "Desktop site" mode.
-        // Providers too old for the API keep the mismatch; shim.js patches
-        // navigator.userAgentData there.
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.USER_AGENT_METADATA)) {
-            WebSettingsCompat.setUserAgentMetadata(settings, desktopMetadata(chromeVersion))
-        }
+
         // A WebView used to stamp every request with "X-Requested-With:
         // <package name>" — the one header that tells a server this is an
         // app, not Chrome. WebViews that support the allow list send it only
@@ -77,6 +66,11 @@ class BotWebView(context: Context) {
             .build()
         view.webChromeClient = WebChromeClient()
         view.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                val url = request?.url?.toString() ?: return true
+                return !isTradingUrl(url)
+            }
+
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                 if (request == null) return null
                 return assetLoader.shouldInterceptRequest(request.url)
@@ -161,50 +155,6 @@ class BotWebView(context: Context) {
         fun isTradingUrl(url: String): Boolean {
             val host = Uri.parse(url).host?.lowercase() ?: return false
             return TRADING_DOMAINS.any { host == it || host.endsWith(".$it") }
-        }
-
-        /** The Chrome build in the WebView's own User-Agent, e.g. "138.0.7204.179". */
-        fun chromeVersionOf(userAgent: String): String =
-            Regex("Chrome/([0-9.]+)").find(userAgent)?.groupValues?.get(1) ?: "128.0.0.0"
-
-        /**
-         * The Chrome build behind an Android desktop site identity (Linux
-         * x86_64) — the string Chrome itself sends in "Desktop site" mode.
-         * Only the major version goes into it: Chrome has reduced its UA to
-         * "138.0.0.0" since 2022, so a full build number there is a tell.
-         */
-        fun desktopUserAgent(chromeVersion: String): String {
-            val major = chromeVersion.substringBefore('.')
-            return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " +
-                "Chrome/$major.0.0.0 Safari/537.36"
-        }
-
-        /**
-         * User-agent client hints to match desktopUserAgent: what desktop
-         * Chrome on Linux reports, with the WebView's real Chrome build as
-         * the full version. The first brand is the GREASE entry Chrome
-         * always includes; servers are told to ignore it.
-         */
-        fun desktopMetadata(chromeVersion: String): UserAgentMetadata {
-            val major = chromeVersion.substringBefore('.')
-            fun brand(name: String, majorVersion: String, fullVersion: String) =
-                UserAgentMetadata.BrandVersion.Builder()
-                    .setBrand(name).setMajorVersion(majorVersion).setFullVersion(fullVersion).build()
-            return UserAgentMetadata.Builder()
-                .setBrandVersionList(listOf(
-                    brand("Not/A)Brand", "8", "8.0.0.0"),
-                    brand("Chromium", major, chromeVersion),
-                    brand("Google Chrome", major, chromeVersion),
-                ))
-                .setFullVersion(chromeVersion)
-                .setPlatform("Linux")
-                .setPlatformVersion("6.8.0")
-                .setArchitecture("x86")
-                .setBitness(64)
-                .setModel("")
-                .setMobile(false)
-                .setWow64(false)
-                .build()
         }
     }
 }

@@ -518,7 +518,75 @@ const count = (re) => logs.filter((l) => re.test(l)).length;
     ok(/^Environment: UA ".+" \| platform .* \| client hints .+ \| screen \d+x\d+ @[\d.]+ \| touch points \d+ \| GPU .+ \| running in the Chrome extension$/.test(reply.environment) &&
        tail.some((l) => l.text === reply.environment),
        'the environment line (what the site sees) heads the log: ' + reply.environment);
+    ok(/^Identity check: consistent — the UA, client hints, platform, touch points and GPU all describe the same .+ \(nothing is spoofed\)\.$/.test(reply.identity) &&
+       tail.some((l) => l.text === reply.identity),
+       'the identity cross-check rides with it and agrees: ' + reply.identity);
     ok(popupAsks('nexa:export-log').ok === true && seen(/Exported \d+ log lines|Log export failed/), 'popup log export acknowledged');
+  }
+
+  // ---- the identity cross-check: real values agree; a faked one is named ----------
+  {
+    const nav = window.navigator;
+    const swap = (name, value) => {
+      const had = Object.getOwnPropertyDescriptor(nav, name);
+      Object.defineProperty(nav, name, { value, configurable: true });
+      return () => { if (had) Object.defineProperty(nav, name, had); else delete nav[name]; };
+    };
+    // jsdom's own UA/platform: whatever they are, they must not contradict each other.
+    ok(dbg.identityCheck().problems.length === 0, 'untouched environment: no contradictions');
+
+    // The exact mismatch the phone log once showed: a desktop Linux UA over
+    // Android client hints, which is what spoofing the UA alone produces.
+    let undo = [
+      swap('userAgent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'),
+      swap('platform', 'Linux x86_64'),
+      swap('userAgentData', { mobile: true, platform: 'Android', brands: [{ brand: 'Chromium', version: '138' }] }),
+    ];
+    let found = dbg.identityCheck().problems;
+    ok(found.length === 2 && found.some((m) => /client hints say platform "Android"/.test(m)) &&
+       found.some((m) => /mobile=true but the UA has no "Mobile" token/.test(m)) &&
+       /^Identity check: MISMATCH \(2\)/.test(dbg.identityLine()),
+       'UA-only spoofing is caught: ' + found.join(' | '));
+
+    // A phone UA whose client hints and touch agree: consistent, even though
+    // it is a phone rather than a PC — the check is about agreement, not kind.
+    for (const fn of undo) fn();
+    undo = [
+      swap('userAgent', 'Mozilla/5.0 (Linux; Android 13; SM-A135F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36'),
+      swap('platform', 'Linux armv8l'),
+      swap('maxTouchPoints', 5),
+      swap('userAgentData', { mobile: true, platform: 'Android', brands: [{ brand: 'Chromium', version: '138' }] }),
+    ];
+    ok(dbg.identityCheck().problems.length === 0 && /same Android phone/.test(dbg.identityLine()),
+       'a real Android phone reads as consistent: ' + dbg.identityLine());
+
+    // A phone that claims no touch, and a Chrome version the hints disagree with.
+    for (const fn of undo) fn();
+    undo = [
+      swap('userAgent', 'Mozilla/5.0 (Linux; Android 13; SM-A135F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36'),
+      swap('platform', 'Linux armv8l'),
+      swap('maxTouchPoints', 0),
+      swap('userAgentData', { mobile: true, platform: 'Android', brands: [{ brand: 'Chromium', version: '120' }] }),
+    ];
+    found = dbg.identityCheck().problems;
+    ok(found.length === 2 && found.some((m) => /an Android UA with no touch points/.test(m)) &&
+       found.some((m) => /Chrome 138 but the client hints say Chromium 120/.test(m)),
+       'a touchless phone and a version disagreement are both named: ' + found.join(' | '));
+    // A real Windows laptop running the extension (a touchscreen model, so
+    // 10 touch points on a desktop — normal, not a contradiction).
+    for (const fn of undo) fn();
+    undo = [
+      swap('userAgent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36'),
+      swap('platform', 'Win32'),
+      swap('maxTouchPoints', 10),
+      swap('userAgentData', { mobile: false, platform: 'Windows', brands: [
+        { brand: 'Google Chrome', version: '153' }, { brand: 'Not_A Brand', version: '8' }, { brand: 'Chromium', version: '153' }] }),
+    ];
+    ok(dbg.identityCheck().problems.length === 0 && /same Windows desktop/.test(dbg.identityLine()),
+       'a real Windows laptop (touchscreen) reads as consistent: ' + dbg.identityLine());
+
+    for (const fn of undo) fn();
+    ok(dbg.identityCheck().problems.length === 0, 'restored: no contradictions again');
   }
 
   // ---- pagehide ----------------------------------------------------------------------
@@ -559,6 +627,7 @@ const count = (re) => logs.filter((l) => re.test(l)).length;
           if (snapshot === null) return Promise.reject(new Error('no receiver'));
           if (msg.type === 'nexa:log') {
             return Promise.resolve({ environment: 'Environment: UA "Mozilla/5.0 (X11; Linux x86_64) Chrome/128" | platform Linux x86_64',
+              identity: 'Identity check: MISMATCH (1) — the UA says Linux but the client hints say platform "Android".',
               lines: [{ n: 1, t: 1_800_000_000_000, text: 'Loaded. Tap the pill to start.' },
                       { n: 2, t: 1_800_000_005_000, text: 'Clicked UP #1 at 1.08 — awaiting confirmation' },
                       { n: 3, t: 1_800_000_009_000, text: 'PLATFORM ALARM: captcha / human check on the page.' }] });
@@ -654,6 +723,9 @@ const count = (re) => logs.filter((l) => re.test(l)).length;
        'popup: Log tab lists the tail newest first, alarm and trade lines marked: ' + logItems.length + ' lines');
     ok(!pdoc.getElementById('environment').hidden && /^UA "Mozilla/.test(txt('environment')) && !pdoc.getElementById('export-log').disabled,
        'popup: the environment line heads the log: ' + txt('environment'));
+    ok(!pdoc.getElementById('identity').hidden && /^MISMATCH \(1\)/.test(txt('identity')) &&
+       pdoc.getElementById('identity').classList.contains('bad'),
+       'popup: a mismatch verdict is shown under it and marked red: ' + txt('identity'));
     pdoc.getElementById('export-log').click();
     await settle();
     ok(sent.includes('nexa:export-log'), 'popup: Export sends nexa:export-log');
@@ -1026,7 +1098,7 @@ const count = (re) => logs.filter((l) => re.test(l)).length;
     ok(swin.__nexaNativeTap(1, 2) === 0, 'android shim: an older bridge answering true counts as a tap that lands now');
     fake.tap = () => -1;
     ok(swin.__nexaNativeTap(1, 2) === false, 'android shim: a bridge refusal (-1) is false');
-    ok(swin.navigator.platform === 'Linux x86_64', 'android shim: navigator.platform reads Linux x86_64');
+    ok(typeof swin.navigator.platform === 'string', 'android shim: native navigator.platform preserved');
     swin.close();
   }
 

@@ -334,6 +334,7 @@
     if (lines === null) {
       list.replaceChildren();
       env.hidden = true;
+      $('identity').hidden = true;
       note.hidden = false;
       note.textContent = app
         ? 'The chart screen did not answer — open Trade and wait for the bot card, then come back.'
@@ -347,6 +348,15 @@
     if (typeof reply.environment === 'string' && reply.environment) {
       env.hidden = false;
       env.textContent = reply.environment.replace(/^Environment: /, '');
+    }
+    // The cross-check of those same signals: consistent, or what disagreed.
+    const identity = $('identity');
+    if (typeof reply.identity === 'string' && reply.identity) {
+      identity.hidden = false;
+      identity.textContent = reply.identity.replace(/^Identity check: /, '');
+      identity.classList.toggle('bad', /MISMATCH/.test(reply.identity));
+    } else {
+      identity.hidden = true;
     }
     const newest = lines.length ? lines[lines.length - 1].n : 0;
     if (newest === lastLogSeq) return;

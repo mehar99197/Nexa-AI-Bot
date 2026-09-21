@@ -73,6 +73,9 @@ val botFiles = listOf(
     "icons/icon48.png",
 )
 
+/** The shim tag copyBotAssets injects into popup.html, and then verifies. */
+val POPUP_SHIM_TAG = "<script src=\"../popup-shim.js\"></script>"
+
 val copyBotAssets = tasks.register<Copy>("copyBotAssets") {
     description = "Copies the extension's files from the repository root into assets/bot."
     val repoRoot = rootProject.projectDir.parentFile
@@ -83,12 +86,35 @@ val copyBotAssets = tasks.register<Copy>("copyBotAssets") {
     from(repoRoot) {
         include("popup.html")
         filter { line: String ->
-            if (line.contains("<script src=\"settings.js\"></script>"))
-                "  <script src=\"../popup-shim.js\"></script>\n$line"
+            if (line.contains("<script src=\"settings.js\"></script>")) "  $POPUP_SHIM_TAG\n$line"
             else line
         }
     }
     into(layout.projectDirectory.dir("src/main/assets/bot"))
+    // The filter above keys off one exact line in popup.html. If that line
+    // ever changes the filter silently does nothing, the settings screen
+    // loads without chrome.storage and fails at runtime with no clue why —
+    // so check the outcome here and stop the build instead.
+    doLast {
+        val copied = layout.projectDirectory.file("src/main/assets/bot/popup.html").asFile
+        val html = copied.readText()
+        val shimAt = html.indexOf(POPUP_SHIM_TAG)
+        val settingsAt = html.indexOf("src=\"settings.js\"")
+        val injections = html.split(POPUP_SHIM_TAG).size - 1
+        if (shimAt < 0) throw GradleException(
+            "popup.html was copied without $POPUP_SHIM_TAG. The copyBotAssets filter looks for the " +
+                "line <script src=\"settings.js\"></script>, which popup.html no longer has in that " +
+                "exact form. Without the shim the app's settings screen has no chrome.storage. " +
+                "Update the filter to match popup.html's current script tag.",
+        )
+        if (injections != 1) throw GradleException(
+            "popup.html was copied with $injections copies of $POPUP_SHIM_TAG; expected exactly 1.",
+        )
+        if (settingsAt >= 0 && shimAt > settingsAt) throw GradleException(
+            "popup.html loads $POPUP_SHIM_TAG after settings.js; the shim must come first, " +
+                "because the scripts after it expect chrome.storage to exist.",
+        )
+    }
 }
 
 tasks.named("preBuild") {

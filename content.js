@@ -989,23 +989,115 @@
     if (logLines.length > LOG_KEEP) logLines.splice(0, logLines.length - LOG_KEEP);
   };
 
-  /**
-   * What the page — and, through the User-Agent, the server — can tell
-   * about where the site is running. Logged first thing, so the Log tab
-   * answers "does Quotex see a PC or a phone?" at a glance: the UA and
-   * platform are what the server is told, the screen, touch points and GPU
-   * are what a script on the page can see.
-   */
-  function environmentLine() {
-    const n = navigator;
-    let gpu = 'n/a';
+  /** The GPU a script on the page can read, or 'n/a'. Asked once. */
+  let gpuCache = null;
+  function gpuName() {
+    if (gpuCache !== null) return gpuCache;
+    gpuCache = 'n/a';
     try {
       if (typeof WebGLRenderingContext === 'function') {
         const gl = document.createElement('canvas').getContext('webgl');
         const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
-        if (gl && info) gpu = String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL));
+        if (gl && info) gpuCache = String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL));
       }
     } catch (_) { /* no WebGL here */ }
+    return gpuCache;
+  }
+
+  /**
+   * The operating system the User-Agent claims — the first token a site
+   * reads. Order matters: an Android UA also says "Linux", and an iPad says
+   * "Macintosh".
+   */
+  function uaOs(ua) {
+    if (/Android/i.test(ua)) return 'Android';
+    if (/iPhone|iPad|iPod/i.test(ua)) return 'iOS';
+    if (/CrOS/i.test(ua)) return 'ChromeOS';
+    if (/Windows NT/i.test(ua)) return 'Windows';
+    if (/Macintosh|Mac OS X/i.test(ua)) return 'macOS';
+    if (/X11|Linux/i.test(ua)) return 'Linux';
+    return 'unknown';
+  }
+
+  // What navigator.platform and the client hints say on each OS when nothing
+  // is being faked: Chrome on Android reports "Linux armv8l", on 64-bit
+  // Windows still "Win32", on a Mac "MacIntel".
+  const PLATFORM_FOR = Object.freeze({
+    Android: /^Linux/, iOS: /^(iPhone|iPad|iPod|MacIntel)$/, ChromeOS: /^(Linux|CrOS)/,
+    Windows: /^Win/, macOS: /^Mac/, Linux: /^Linux/,
+  });
+  const HINT_PLATFORM_FOR = Object.freeze({
+    Android: 'Android', iOS: 'iOS', ChromeOS: 'Chrome OS',
+    Windows: 'Windows', macOS: 'macOS', Linux: 'Linux',
+  });
+  const PHONE_GPU = /Adreno|Mali|PowerVR|Apple GPU|Tegra|VideoCore|Immortalis|Xclipse/i;
+  const DESKTOP_GPU = /NVIDIA|GeForce|Radeon|Intel\(R\)|Iris|Quadro|Arc\(TM\)/i;
+  const SOFTWARE_GPU = /SwiftShader|llvmpipe|Software|Basic Render/i;
+  const article = (word) => (/^[aeiou]/i.test(word) ? 'an ' : 'a ');
+
+  /**
+   * Cross-check the signals a site reads against each other. Nothing here is
+   * disguised — the Android app and the Chrome extension both report the
+   * device's own User-Agent, platform and client hints — so this is a check
+   * that they tell one story, not an attempt to tell a different one. It is
+   * exactly the cross-check an anti-bot script runs: a UA that claims a
+   * desktop while the client hints say a phone (or a phone GPU, or no touch
+   * points) is the sort of contradiction no real browser produces.
+   * @returns {{os: string, mobile: boolean, problems: string[]}}
+   */
+  function identityCheck() {
+    const n = navigator;
+    const ua = n.userAgent || '';
+    const os = uaOs(ua);
+    const hints = n.userAgentData || null;
+    const uaMobile = /Mobile/.test(ua);
+    const touch = n.maxTouchPoints || 0;
+    const problems = [];
+
+    const expected = PLATFORM_FOR[os];
+    if (expected && n.platform && !expected.test(n.platform)) {
+      problems.push('the UA says ' + os + ' but navigator.platform is "' + n.platform + '"');
+    }
+    if (hints) {
+      // The Sec-CH-UA-* request headers come from this same data, so a
+      // disagreement here is one the server sees too.
+      const wanted = HINT_PLATFORM_FOR[os];
+      if (wanted && hints.platform && hints.platform !== wanted) {
+        problems.push('the UA says ' + os + ' but the client hints say platform "' + hints.platform + '"');
+      }
+      if (typeof hints.mobile === 'boolean' && hints.mobile !== uaMobile) {
+        problems.push('the client hints say mobile=' + hints.mobile + ' but the UA has ' +
+          (uaMobile ? 'a' : 'no') + ' "Mobile" token');
+      }
+      const uaMajor = (/Chrome\/(\d+)/.exec(ua) || [])[1] || null;
+      const brands = Array.isArray(hints.brands) ? hints.brands : [];
+      const brand = brands.find((entry) => entry && /^(Google Chrome|Chromium|Android WebView)$/.test(entry.brand));
+      if (uaMajor && brand && String(brand.version) !== uaMajor) {
+        problems.push('the UA is Chrome ' + uaMajor + ' but the client hints say ' +
+          brand.brand + ' ' + brand.version);
+      }
+    }
+    const phone = os === 'Android' || os === 'iOS';
+    if (phone && touch === 0) problems.push(article(os) + os + ' UA with no touch points');
+    const gpu = gpuName();
+    if (gpu !== 'n/a' && !SOFTWARE_GPU.test(gpu)) {
+      if (phone && DESKTOP_GPU.test(gpu)) problems.push(article(os) + os + ' UA with a desktop GPU ("' + gpu + '")');
+      if (!phone && PHONE_GPU.test(gpu)) problems.push(article(os) + os + ' UA with a phone GPU ("' + gpu + '")');
+    }
+    return { os, mobile: uaMobile, problems };
+  }
+
+  /**
+   * What the page — and, through the User-Agent and the Sec-CH-UA-* headers,
+   * the server — can tell about where the site is running. Logged first
+   * thing, so the Log tab answers "does Quotex see a PC or a phone?" at a
+   * glance: the UA, platform and client hints are what the server is told,
+   * the screen, touch points and GPU are what a script on the page can see.
+   * All of it is the device's own — the app reports an Android phone, the
+   * extension reports the computer it runs on.
+   */
+  function environmentLine() {
+    const n = navigator;
     const hints = n.userAgentData
       ? 'mobile=' + n.userAgentData.mobile + ' platform=' + n.userAgentData.platform +
         ' brands=' + (Array.isArray(n.userAgentData.brands)
@@ -1014,8 +1106,19 @@
     return 'Environment: UA "' + n.userAgent + '" | platform ' + n.platform +
       ' | client hints ' + hints +
       ' | screen ' + screen.width + 'x' + screen.height + ' @' + (window.devicePixelRatio || 1) +
-      ' | touch points ' + (n.maxTouchPoints || 0) + ' | GPU ' + gpu +
+      ' | touch points ' + (n.maxTouchPoints || 0) + ' | GPU ' + gpuName() +
       ' | running in ' + (typeof globalThis.__nexaNativeTap === 'function' ? 'the Android app' : 'the Chrome extension');
+  }
+
+  /** The verdict of identityCheck as one log line. */
+  function identityLine() {
+    const check = identityCheck();
+    const device = check.os + (check.mobile ? ' phone' : ' desktop');
+    if (check.problems.length === 0) {
+      return 'Identity check: consistent — the UA, client hints, platform, touch points and GPU ' +
+        'all describe the same ' + device + ', which is the real one (nothing is spoofed).';
+    }
+    return 'Identity check: MISMATCH (' + check.problems.length + ') — ' + check.problems.join('; ') + '.';
   }
 
   // The pure modules load ahead of this file from the same manifest entry.
@@ -2632,22 +2735,29 @@
    * A mouse click on `element` as a hand makes it: the path (worked out as
    * it starts), a rest on the spot, the button down, held, up, the click.
    */
-  function mouseClickSteps(element, point, travelMs, dwellMs, holdMs) {
+  function mouseClickSteps(element, travelMs, dwellMs, holdMs) {
     let target = element;
+    const spot = { x: 0, y: 0 };
     return [
-      { delay: 0, run: () => mousePathSteps(point, travelMs, false) },
+      { delay: 0, run: () => {
+        // Where the button is now, not where it was when this was queued.
+        const point = landingPoint(element);
+        spot.x = point.x;
+        spot.y = point.y;
+        return mousePathSteps(point, travelMs, false);
+      } },
       { delay: dwellMs, run: () => {
-        target = pressTarget(element, point);
-        const down = eventInit(point.x, point.y, { buttons: 1 });
+        target = pressTarget(element, spot);
+        const down = eventInit(spot.x, spot.y, { buttons: 1 });
         firePointer(target, 'pointerdown', down, 'mouse', true);
         fireMouse(target, 'mousedown', down);
         focusAfterPress(target);
       } },
       { delay: holdMs, run: () => {
-        const up = eventInit(point.x, point.y);
+        const up = eventInit(spot.x, spot.y);
         firePointer(target, 'pointerup', up, 'mouse', false);
         fireMouse(target, 'mouseup', up);
-        fireMouse(target, 'click', eventInit(point.x, point.y, { detail: 1 }));
+        fireMouse(target, 'click', eventInit(spot.x, spot.y, { detail: 1 }));
       } },
     ];
   }
@@ -2658,11 +2768,16 @@
    * then the mouse-compatibility events and the click, as browsers order
    * a tap. The sequence of simulateClick, spread over the hold.
    */
-  function touchTapSteps(element, point, holdMs) {
+  function touchTapSteps(element, holdMs) {
     let target = element;
-    const { x, y } = point;
+    let x = 0;
+    let y = 0;
     return [
       { delay: 0, run: () => {
+        // Where the button is now (see mouseClickSteps).
+        const point = landingPoint(element);
+        x = point.x;
+        y = point.y;
         target = pressTarget(element, point);
         const down = eventInit(x, y, { buttons: 1 });
         firePointer(target, 'pointerover', down, 'touch', true);
@@ -2692,16 +2807,25 @@
     ];
   }
 
-  /** The steps of a click or tap on `element` at `point`, and how long they take. */
-  function pressSteps(element, point) {
+  /**
+   * The steps of a click or tap on `element`, and how long they take. The
+   * timings are settled here, because the caller promises confirmTrade a
+   * landing time the moment the gesture is queued; the point on the button
+   * is settled when the gesture actually starts, so a panel that moved or
+   * scrolled while the stake was being typed is still hit. The distance for
+   * the travel time is measured from where the button is now, which is as
+   * good an estimate as a hand's.
+   */
+  function pressSteps(element) {
     if (pointerKind() === 'touch') {
       const hold = rand(60, 130);
-      return { steps: touchTapSteps(element, point, hold), ms: hold + 10 };
+      return { steps: touchTapSteps(element, hold), ms: hold + 10 };
     }
-    const travel = mouseTravelMs(mouseOrigin(), point, Math.min(point.rect.width, point.rect.height));
+    const guess = landingPoint(element);
+    const travel = mouseTravelMs(mouseOrigin(), guess, Math.min(guess.rect.width, guess.rect.height));
     const dwell = rand(60, 220);
     const hold = rand(55, 140);
-    return { steps: mouseClickSteps(element, point, travel, dwell, hold), ms: travel + dwell + hold };
+    return { steps: mouseClickSteps(element, travel, dwell, hold), ms: travel + dwell + hold };
   }
 
   const KEY_CODES = { '.': ['Period', 190], ',': ['Comma', 188] };
@@ -2743,8 +2867,7 @@
     let setter = null;
     try { setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; } catch (_) { setter = null; }
     if (typeof setter !== 'function') return null;
-    const point = landingPoint(input);
-    const press = pressSteps(input, point);
+    const press = pressSteps(input);
     const steps = press.steps.slice();
     let ms = press.ms;
     // A person selects what is there (a double-click, a drag: the result is
@@ -2788,21 +2911,21 @@
    */
   function humanClick(element) {
     if (!element || typeof element.getBoundingClientRect !== 'function') return null;
-    const point = landingPoint(element);
     if (typeof globalThis.__nexaNativeTap === 'function' && gesture.pending) {
       // The stake is still being typed by synthetic keys (the app declined
-      // to type it): the real finger waits its turn behind them.
-      const after = gesture.readyAt - Date.now();
-      gesture.add([{ delay: 0, run: () => {
-        if (nativeTap(element, point.x, point.y) === null) simulateClick(element);
+      // to type it): the real finger waits its turn behind them, and aims
+      // when its turn comes rather than now.
+      return gesture.add([{ delay: 0, run: () => {
+        const spot = landingPoint(element);
+        if (nativeTap(element, spot.x, spot.y) === null) simulateClick(element);
       } }], 200);
-      return after + 200;
     }
+    const point = landingPoint(element);
     const native = nativeTap(element, point.x, point.y);
     if (native !== null) return native;
     if (typeof element.dispatchEvent !== 'function') return null;
     if (document.visibilityState === 'hidden') return null;   // see gesture.next
-    const press = pressSteps(element, point);
+    const press = pressSteps(element);
     return gesture.add(press.steps, press.ms);
   }
 
@@ -4814,16 +4937,17 @@
     htf: htfView,
     simulateClick,
     humanClick,
-    humanType,
     landingPoint,
     get gesture() { return gesture; },
     get realPointer() { return realPointer; },
-    get pointerState() { return pointerState; },
     setStake,
     get alarm() { return lastAlarm; },
     platformAlarm,
     get profile() { return { ...profile }; },
     loadProfile,
+    environmentLine,
+    identityCheck,
+    identityLine,
     // The storage cache, for the smoke harness (chrome.storage is loaded once).
     store: { get: (key) => store.get(key), set: (key, value) => store.set(key, value), remove: (key) => store.remove(key) },
   }));
@@ -4913,7 +5037,9 @@
         case 'nexa:stop': stopBot(); sendResponse(statusSnapshot()); break;
         case 'nexa:export-ticks': exportRecording(); sendResponse({ ok: true }); break;
         case 'nexa:export-trades': exportTradesCsv(); sendResponse({ ok: true }); break;
-        case 'nexa:log': sendResponse({ lines: logLines.slice(), environment: environment }); break;
+        case 'nexa:log':
+          sendResponse({ lines: logLines.slice(), environment: environment, identity: identity });
+          break;
         case 'nexa:export-log': exportLog(); sendResponse({ ok: true }); break;
         default: return false;
       }
@@ -4933,6 +5059,8 @@
   }
 
   const environment = environmentLine();
+  const identity = identityLine();
   log(environment);
+  log(identity);
   log('Loaded. Tap the pill to start.');
 })();

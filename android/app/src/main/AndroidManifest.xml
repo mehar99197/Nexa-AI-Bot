@@ -7,7 +7,7 @@
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.Nexa"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:supportsRtl="true"
         android:usesCleartextTraffic="false">
 

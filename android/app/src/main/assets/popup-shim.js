@@ -58,11 +58,6 @@
 
   function sendMessage(_tabId, message) {
     const json = JSON.stringify(message);
-    if (typeof bridge.sendToPageAsync !== 'function') {
-      // An older app build: the blocking relay.
-      const reply = parse(bridge.sendToPage(json));
-      return reply === null ? Promise.reject(new Error('no page')) : Promise.resolve(reply);
-    }
     return new Promise((resolve, reject) => {
       seq += 1;
       const id = 'r' + seq;

@@ -11,8 +11,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
 import java.lang.ref.WeakReference
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 /** The app's version name, for the popup's version line. */
 fun versionName(context: Context): String = try {
@@ -23,7 +21,8 @@ fun versionName(context: Context): String = try {
 
 /**
  * The trading page's WebView, reachable from the settings screen. Every
- * JavaScript call into it goes through the UI thread, as WebView requires.
+ * JavaScript call into it goes through the UI thread, as WebView requires,
+ * and none of them blocks the caller.
  */
 object PageRef {
     @Volatile
@@ -35,31 +34,6 @@ object PageRef {
     /** Runs JavaScript in the trading page; fire and forget. */
     fun run(script: String) {
         main.post { current()?.evaluateJavascript(script, null) }
-    }
-
-    /**
-     * Runs JavaScript in the trading page and waits (from a non-UI thread)
-     * for the JSON encoding of its value. Null when there is no page, when
-     * it did not answer in time, or when called from the UI thread itself
-     * (which must never block).
-     */
-    fun call(script: String, timeoutMs: Long): String? {
-        if (Looper.myLooper() == Looper.getMainLooper()) return null
-        val latch = CountDownLatch(1)
-        var result: String? = null
-        main.post {
-            val view = current()
-            if (view == null) {
-                latch.countDown()
-            } else {
-                view.evaluateJavascript(script) { value ->
-                    result = value
-                    latch.countDown()
-                }
-            }
-        }
-        latch.await(timeoutMs, TimeUnit.MILLISECONDS)
-        return result
     }
 }
 
@@ -152,17 +126,9 @@ class Bridge(context: Context) {
     }
 
     /**
-     * chrome.tabs.sendMessage from the settings screen, the blocking form:
-     * relayed into the trading page's onMessage listeners, their reply
-     * returned as JSON text. Kept for older popup shims; the settings screen
-     * now uses sendToPageAsync, which never blocks its JavaScript.
-     */
-    @JavascriptInterface
-    fun sendToPage(json: String): String = unwrapReply(PageRef.call(messageScript(json), 3000))
-
-    /**
-     * The same relay, asynchronous: the request is posted to the trading
-     * page and its answer is delivered into the settings screen's WebView as
+     * chrome.tabs.sendMessage from the settings screen: the request is
+     * posted to the trading page and its answer is delivered back into the
+     * settings screen's WebView as
      * window.__nexaPopup.reply(requestId, json) — "null" when there is no
      * page. Nothing waits on anything; the settings page's own timeout
      * decides when an unanswered request counts as "no page".

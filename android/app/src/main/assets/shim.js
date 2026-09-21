@@ -55,57 +55,6 @@
     return;
   }
 
-  // Align navigator platform and userAgentData with the Linux desktop site identity
-  try {
-    Object.defineProperty(navigator, 'platform', {
-      get: () => 'Linux x86_64',
-      configurable: true,
-      enumerable: true,
-    });
-  } catch (_) {}
-
-  // Client hints. The app sets the WebView's user-agent metadata
-  // (BotWebView.desktopMetadata), which makes navigator.userAgentData — and
-  // the Sec-CH-UA-* headers — describe desktop Chrome on Linux like the
-  // User-Agent does. A provider too old for that API still answers
-  // "Android WebView, mobile" here, so the object is patched by hand in
-  // that case only. navigator.userAgentData is a fresh object on every
-  // read (an instance override is lost at once), so the prototype is what
-  // is patched: mobile, platform, brands, toJSON and the high-entropy call.
-  try {
-    const uaData = navigator.userAgentData;
-    const proto = typeof NavigatorUAData === 'function' ? NavigatorUAData.prototype : null;
-    if (uaData && proto && uaData.mobile === true) {
-      const major = (/Chrome\/(\d+)/.exec(navigator.userAgent) || [])[1] || '128';
-      const brands = () => [
-        { brand: 'Not/A)Brand', version: '8' },
-        { brand: 'Chromium', version: major },
-        { brand: 'Google Chrome', version: major },
-      ];
-      const define = (name, get) => Object.defineProperty(proto, name, { get, configurable: true, enumerable: true });
-      define('mobile', () => false);
-      define('platform', () => 'Linux');
-      define('brands', brands);
-      proto.toJSON = function () { return { brands: this.brands, mobile: this.mobile, platform: this.platform }; };
-      const highEntropy = proto.getHighEntropyValues;
-      proto.getHighEntropyValues = function (hints) {
-        return highEntropy.call(this, hints).then((values) => {
-          const out = { ...values, brands: brands(), mobile: false, platform: 'Linux' };
-          if ('model' in out) out.model = '';
-          if ('platformVersion' in out) out.platformVersion = '6.8.0';
-          if ('architecture' in out) out.architecture = 'x86';
-          if ('bitness' in out) out.bitness = '64';
-          if ('wow64' in out) out.wow64 = false;
-          if (Array.isArray(out.fullVersionList)) {
-            out.fullVersionList = out.fullVersionList.map((entry) =>
-              entry.brand === 'Android WebView' ? { brand: 'Google Chrome', version: entry.version } : entry);
-          }
-          return out;
-        });
-      };
-    }
-  } catch (_) { /* no client hints API here — nothing to align */ }
-
   /**
    * The Java object, whenever it is there. Kept in this closure from the
    * first sighting; the global the WebView injected is then redefined
