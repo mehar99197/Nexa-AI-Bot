@@ -1034,6 +1034,10 @@
   const DESKTOP_GPU = /NVIDIA|GeForce|Radeon|Intel\(R\)|Iris|Quadro|Arc\(TM\)/i;
   const SOFTWARE_GPU = /SwiftShader|llvmpipe|Software|Basic Render/i;
   const article = (word) => (/^[aeiou]/i.test(word) ? 'an ' : 'a ');
+  // A real Android device is ARM: navigator.platform reads "Linux armv8l" or
+  // "Linux aarch64". An x86 platform under an Android UA is what an emulator
+  // looks like from the page (BlueStacks, Genymotion, an AVD).
+  const X86_PLATFORM = /i[3-6]86|x86/i;
 
   /**
    * Cross-check the signals a site reads against each other. Nothing here is
@@ -1057,6 +1061,13 @@
     const expected = PLATFORM_FOR[os];
     if (expected && n.platform && !expected.test(n.platform)) {
       problems.push('the UA says ' + os + ' but navigator.platform is "' + n.platform + '"');
+    } else if (os === 'Android' && n.platform && X86_PLATFORM.test(n.platform)) {
+      // "Linux i686" passes the prefix test above but is still x86, and an ARM
+      // phone GPU beside it makes the two impossible together.
+      const gpu = gpuName();
+      problems.push('the UA says Android but navigator.platform is "' + n.platform +
+        '" (x86) — a phone is ARM, so this is an emulator or an x86 Android build' +
+        (PHONE_GPU.test(gpu) ? ', and it reports an ARM phone GPU ("' + gpu + '")' : ''));
     }
     if (hints) {
       // The Sec-CH-UA-* request headers come from this same data, so a
@@ -1113,7 +1124,11 @@
   /** The verdict of identityCheck as one log line. */
   function identityLine() {
     const check = identityCheck();
-    const device = check.os + (check.mobile ? ' phone' : ' desktop');
+    // An Android or iOS UA without the "Mobile" token is a tablet, never a
+    // desktop; everything else is a computer.
+    const device = (check.os === 'Android' || check.os === 'iOS')
+      ? check.os + (check.mobile ? ' phone' : ' tablet')
+      : check.os + ' desktop';
     if (check.problems.length === 0) {
       return 'Identity check: consistent — the UA, client hints, platform, touch points and GPU ' +
         'all describe the same ' + device + ', which is the real one (nothing is spoofed).';

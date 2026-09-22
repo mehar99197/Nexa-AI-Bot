@@ -585,6 +585,34 @@ const count = (re) => logs.filter((l) => re.test(l)).length;
     ok(dbg.identityCheck().problems.length === 0 && /same Windows desktop/.test(dbg.identityLine()),
        'a real Windows laptop (touchscreen) reads as consistent: ' + dbg.identityLine());
 
+    // An Android emulator (BlueStacks): the UA claims a Galaxy S22 Ultra and
+    // the GPU an Adreno 650, but navigator.platform leaks x86 — a phone is ARM.
+    for (const fn of undo) fn();
+    undo = [
+      swap('userAgent', 'Mozilla/5.0 (Linux; Android 9; SM-S908E Build/TP1A.220624.014; wv) AppleWebKit/537.36 ' +
+        '(KHTML, like Gecko) Version/4.0 Chrome/129.0.6668.70 Safari/537.36'),
+      swap('platform', 'Linux i686'),
+      swap('maxTouchPoints', 5),
+      swap('userAgentData', { mobile: false, platform: 'Android', brands: [{ brand: 'Android WebView', version: '129' }] }),
+    ];
+    found = dbg.identityCheck().problems;
+    ok(found.length === 1 && /navigator\.platform is "Linux i686" \(x86\)/.test(found[0]) &&
+       /emulator or an x86 Android build/.test(found[0]),
+       'an x86 platform under an Android UA is caught as an emulator: ' + found[0]);
+    // The same UA on real ARM hardware: an Android tablet, and never called a
+    // "desktop" just because the UA carries no "Mobile" token.
+    for (const fn of undo) fn();
+    undo = [
+      swap('userAgent', 'Mozilla/5.0 (Linux; Android 13; SM-X900) AppleWebKit/537.36 ' +
+        '(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'),
+      swap('platform', 'Linux aarch64'),
+      swap('maxTouchPoints', 5),
+      swap('userAgentData', { mobile: false, platform: 'Android', brands: [{ brand: 'Chromium', version: '129' }] }),
+    ];
+    ok(dbg.identityCheck().problems.length === 0 && /same Android tablet/.test(dbg.identityLine()) &&
+       !/desktop/.test(dbg.identityLine()),
+       'an ARM Android without the "Mobile" token is a tablet, never a desktop: ' + dbg.identityLine());
+
     for (const fn of undo) fn();
     ok(dbg.identityCheck().problems.length === 0, 'restored: no contradictions again');
   }
